@@ -22,14 +22,12 @@ class SecurityManager:
         self.current_role: str = "user" # 'root', 'user', 'guest'
         self.acl_rules: Dict[str, Dict[str, str]] = {} # path -> {user: perms}
         self.firewall_rules: List[dict] = [
-            {"id": 1, "action": "ALLOW", "proto": "TCP", "port": 8088, "desc": "PHP Web Browser"},
             {"id": 2, "action": "ALLOW", "proto": "TCP", "port": 9000, "desc": "Java OVM Sandbox"},
             {"id": 3, "action": "ALLOW", "proto": "UDP", "port": 53, "desc": "DNS Resolver"},
             {"id": 4, "action": "DENY", "proto": "ALL", "port": 23, "desc": "Telnet Insecure"},
         ]
         self.app_sandboxes: Dict[str, List[str]] = {
             "core.shell": ["CAP_SYS_EXEC", "CAP_NET_PROBE", "CAP_FS_RW"],
-            "core.browser": ["CAP_NET_CLIENT", "CAP_RENDER"],
             "core.ovm": ["CAP_MATH_DSP", "CAP_MEMORY_ISOLATION"],
         }
         self.secrets_vault: Dict[str, str] = {}

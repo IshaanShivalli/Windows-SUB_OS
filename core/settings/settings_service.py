@@ -42,7 +42,6 @@ class SystemSettingsService:
                 ("kernel_guard", "Kernel Memory Page Supervisor", "bin/kernel_guard.exe"),
                 ("net_stack", "Virtual Network Gateway Daemon", "python network/net_stack.py"),
                 ("storage_vfs", "2GB Raw Block Storage Journaler", "python storage/storage_manager.py"),
-                ("compositor_wm", "C++ Desktop Window Manager", "bin/operator_wm.exe"),
             ]
             for s in services:
                 conn.execute("INSERT OR IGNORE INTO sys_services (name, description, exec_cmd) VALUES (?, ?, ?)", s)

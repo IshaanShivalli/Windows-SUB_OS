@@ -13,9 +13,7 @@ This repository is a development prototype, not yet a bootable standalone operat
 - Simulated 2 GB sparse EXT-OPFS storage image in [`storage`](storage)
 - Host-assisted DNS, TCP probing, routing, and HTTP fetching in [`network/net_stack.py`](network/net_stack.py)
 - Java Operator Virtual Machine examples in [`runtime_java`](runtime_java)
-- C++ window manager sources in [`gui`](gui)
 - SQLite system registry and package catalog in [`db`](db)
-- Browser surface in [`browser`](browser)
 
 ## Requirements
 
@@ -39,7 +37,7 @@ To use the shell by itself:
 python shell/opshell.py
 ```
 
-Build the Rust browser host and copy it into `bin`:
+Build the Rust kernel guard and copy it into `bin`:
 
 ```powershell
 .\build.ps1 -Release
@@ -52,7 +50,6 @@ Useful commands include `help`, `sys.probe`, `storage.inspect`, `net.ifconfig`, 
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — subsystem design and module responsibilities
 - [`docs/REQUIREMENTS.md`](docs/REQUIREMENTS.md) — runtime, build, and platform requirements
 - [`docs/ROADMAP.md`](docs/ROADMAP.md) — recommended additions and implementation order
-- [`docs/UI.md`](docs/UI.md) — desktop startup, controls, file manager, and Google Drive behavior
 
 ## Development notes
 

@@ -11,6 +11,7 @@ MAGIC_SIGNATURE = b"OPERATOR_FS_2GB"
 
 STORAGE_IMG_PATH = Path(__file__).resolve().parent / "operator_storage_2gb.img"
 META_PATH = Path(__file__).resolve().parent / "storage_metadata.json"
+OS_ROOT_PATH = Path(__file__).resolve().parent / "operator_os_root"
 
 class OperatorStorageManager:
     """
@@ -35,14 +36,26 @@ class OperatorStorageManager:
             print("[STORAGE:VFS] 2GB Storage Device Partitioned & Formatted [EXT-OPFS].")
         self.init_os_folders()
 
+    def get_os_root(self) -> Path:
+        """Return the private root owned by the Operator OS storage subsystem.
+
+        All persistent OS data must resolve below this directory. It is kept
+        separate from the source tree and is excluded from version control.
+        """
+        OS_ROOT_PATH.mkdir(parents=True, exist_ok=True)
+        return OS_ROOT_PATH
+
     def init_os_folders(self):
         """Create the private, visible-to-Operator home tree for the subsystem."""
+        os_root = self.get_os_root()
         folders = [
-            "Home/Docs", "Home/Downloads", "Home/Pictures", "Home/Videos",
-            "Google Drive/Docs", "Google Drive/Videos", "Google Drive/Pictures"
+            "etc", "var/log", "var/lib", "var/cache", "tmp", "home/operator/Docs",
+            "home/operator/Downloads", "home/operator/Pictures", "home/operator/Videos",
+            "home/operator/Google Drive/Docs", "home/operator/Google Drive/Videos",
+            "home/operator/Google Drive/Pictures"
         ]
         for folder in folders:
-            (self.img_path.parent / "operator_home" / folder).mkdir(parents=True, exist_ok=True)
+            (os_root / folder).mkdir(parents=True, exist_ok=True)
 
     def get_disk_info(self):
         size_on_disk = self.img_path.stat().st_size if self.img_path.exists() else 0

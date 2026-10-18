@@ -52,8 +52,6 @@ class DeveloperTools:
         logs = []
         logs.append("[BUILD] Compiling C Kernel...")
         subprocess.run(["gcc", "kernel/core_kernel.c", "-o", "bin/operator_kernel.exe"], cwd=str(ROOT_DIR))
-        logs.append("[BUILD] Compiling C++ Window Manager...")
-        subprocess.run(["g++", "-O2", "gui/window_manager_v2.cpp", "-o", "bin/operator_wm.exe", "-lgdi32", "-luser32", "-lshell32", "-mwindows"], cwd=str(ROOT_DIR))
         logs.append("[BUILD] Compiling Java OVM...")
         subprocess.run(["javac", "-d", "runtime_java/bin", "runtime_java/src/operator/runtime/OperatorRuntime.java"], cwd=str(ROOT_DIR))
         logs.append("[BUILD] Build cycle completed successfully.")

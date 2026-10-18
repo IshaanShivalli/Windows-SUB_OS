@@ -41,22 +41,6 @@ class ApplicationManager:
                 "permissions": ["hardware", "metrics"],
                 "exec_cmd": "java -cp runtime_java/bin operator.runtime.OperatorRuntime diagnostics"
             },
-            {
-                "name": "WebBrowser",
-                "app_id": "app.browser",
-                "runtime": "web",
-                "entrypoint": "browser/index.html",
-                "permissions": ["network", "render"],
-                "exec_cmd": "start browser/index.html"
-            },
-            {
-                "name": "DesktopCompositor",
-                "app_id": "app.gui",
-                "runtime": "native",
-                "entrypoint": "bin/operator_wm.exe",
-                "permissions": ["display", "ipc"],
-                "exec_cmd": "bin/operator_wm.exe"
-            }
         ]
         for m in manifests:
             mf = MANIFEST_DIR / f"{m['app_id']}.json"

@@ -3,9 +3,9 @@ import shutil
 from pathlib import Path
 from typing import Dict, List, Optional
 
-ROOT_DIR = Path(__file__).resolve().parent.parent.parent
-STORAGE_DIR = ROOT_DIR / "storage"
-VFS_ROOT = STORAGE_DIR / "vfs_root"
+from storage.storage_manager import OperatorStorageManager
+
+STORAGE_DIR = Path(__file__).resolve().parent.parent
 
 class VFSNode:
     def __init__(self, path: str, is_dir: bool = False, owner: str = "root", perms: str = "rwxr-xr-x"):
@@ -26,6 +26,8 @@ class VirtualFileSystem:
         return cls._instance
 
     def init_vfs(self):
+        VFS_ROOT = OperatorStorageManager().get_os_root()
+        self.vfs_root = VFS_ROOT
         VFS_ROOT.mkdir(parents=True, exist_ok=True)
         self.mount_table: Dict[str, str] = {
             "/": str(VFS_ROOT),
@@ -47,7 +49,10 @@ class VirtualFileSystem:
         if not virtual_path.startswith("/"):
             virtual_path = "/" + virtual_path
         # Map root
-        return VFS_ROOT / virtual_path.lstrip("/")
+        candidate = (self.vfs_root / virtual_path.lstrip("/")).resolve()
+        if candidate != self.vfs_root and self.vfs_root not in candidate.parents:
+            raise ValueError("VFS path escapes the Operator OS storage root")
+        return candidate
 
     def mount(self, target: str, source: str) -> str:
         self.mount_table[target] = source

@@ -33,7 +33,6 @@ class ServiceManager:
         self.register("kernel_guard.service", "Kernel Memory & Hardware Guard", "bin/kernel_guard.exe")
         self.register("net_stack.service", "Subsystem TCP/IP Network Gateway", "python network/net_stack.py", deps=["kernel_guard.service"])
         self.register("db_registry.service", "System SQLite Registry Daemon", "core/services/db_daemon", deps=["kernel_guard.service"])
-        self.register("window_compositor.service", "C++ Desktop Window Manager", "bin/operator_wm.exe", deps=["kernel_guard.service", "db_registry.service"])
 
     def register(self, name: str, desc: str, cmd: str, deps: List[str] = None):
         self.services[name] = ServiceUnit(name, desc, cmd, deps)

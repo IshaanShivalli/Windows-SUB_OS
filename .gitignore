@@ -37,6 +37,7 @@ bin/*.manifest
 target/
 kernel/kernel_guard/target/
 kernel/kernel_guard/.git.nested-backup/
+kernel/kernel_guard/Cargo.lock
 
 # Java
 *.class
@@ -58,6 +59,7 @@ storage/crash_reports/
 storage/logs/
 storage/dev/
 storage/operator_home/
+storage/operator_os_root/
 storage/restore_points/
 storage/__pycache__/
 *.log

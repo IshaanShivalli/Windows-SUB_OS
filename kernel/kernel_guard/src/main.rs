@@ -2,19 +2,7 @@
 //! Manages memory page protection, hardware driver abstractions, and safe VFS journaling.
 
 use std::collections::HashMap;
-use std::env;
-use std::path::PathBuf;
 use std::time::Instant;
-
-#[cfg(target_os = "windows")]
-use tao::{
-    event::{Event, WindowEvent},
-    event_loop::{ControlFlow, EventLoop},
-    window::WindowBuilder,
-};
-
-#[cfg(target_os = "windows")]
-use wry::WebViewBuilder;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DeviceKind {
@@ -65,43 +53,6 @@ pub struct OperatorDriverBus {
     pub drivers: Vec<DeviceDriver>,
 }
 
-/// Opens the Operator browser inside a window owned by the Rust subsystem
-/// host. The HTML remains the browser's UI and is loaded locally, so this does
-/// not delegate the window to the host's default browser.
-#[cfg(target_os = "windows")]
-fn open_operator_browser() -> Result<(), Box<dyn std::error::Error>> {
-    let root = env::current_dir()?;
-    let browser_file: PathBuf = root.join("browser").join("index.html");
-    let browser_url = format!("file:///{}", browser_file.to_string_lossy().replace('\\', "/"));
-
-    let event_loop = EventLoop::new();
-    let window = WindowBuilder::new()
-        .with_title("Operator OS Browser - Native Rust Subsystem Engine")
-        .with_inner_size(tao::dpi::LogicalSize::new(1280.0, 800.0))
-        .build(&event_loop)?;
-
-    let _webview = WebViewBuilder::new()
-        .with_url(&browser_url)
-        .build(&window)?;
-
-    println!("[BROWSER:Rust] Operator browser hosted at {browser_url}");
-    event_loop.run(move |event, _, control_flow| {
-        *control_flow = ControlFlow::Wait;
-        if let Event::WindowEvent {
-            event: WindowEvent::CloseRequested,
-            ..
-        } = event
-        {
-            *control_flow = ControlFlow::Exit;
-        }
-    });
-}
-
-#[cfg(not(target_os = "windows"))]
-fn open_operator_browser() -> Result<(), Box<dyn std::error::Error>> {
-    Err("the embedded Operator browser currently requires Windows WebView2".into())
-}
-
 impl OperatorDriverBus {
     pub fn new() -> Self {
         Self { drivers: Vec::new() }
@@ -127,14 +78,6 @@ impl OperatorDriverBus {
 }
 
 fn main() {
-    if env::args().any(|arg| arg == "browser") {
-        if let Err(error) = open_operator_browser() {
-            eprintln!("[BROWSER:Rust] Failed to open embedded browser: {error}");
-            std::process::exit(1);
-        }
-        return;
-    }
-
     let start_time = Instant::now();
     println!("[KERNEL:Rust] Initializing Safe Hardware Layer & Memory Supervisor...");
 
@@ -143,7 +86,7 @@ fn main() {
 
     // Register hardware drivers
     let d_display = bus.register("vga_compositor_drv", DeviceKind::Display);
-    let d_kbd = bus.register("ps2_keyboard_drv", DeviceKind::Keyboard);
+    bus.register("ps2_keyboard_drv", DeviceKind::Keyboard);
     let d_net = bus.register("virtio_net_drv", DeviceKind::NetworkInterface);
     let d_disk = bus.register("nvme_storage_drv", DeviceKind::BlockStorage);
 

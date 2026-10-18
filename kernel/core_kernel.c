@@ -189,13 +189,11 @@ int main(int argc, char **argv) {
     kernel_init();
 
     // Spawn fundamental system daemons
-    int32_t pid_gui = sys_process_create("gui_compositor", 10);
     int32_t pid_shell = sys_process_create("opshell_daemon", 8);
     int32_t pid_db = sys_process_create("sqldb_service", 9);
     int32_t pid_ovm = sys_process_create("java_runtime", 5);
 
     // Allocate memory pages
-    sys_mem_allocate(pid_gui, 16);
     sys_mem_allocate(pid_shell, 8);
     sys_mem_allocate(pid_db, 12);
     sys_mem_allocate(pid_ovm, 24);
@@ -207,7 +205,6 @@ int main(int argc, char **argv) {
     sys_vfs_mount("/proc/cpuinfo", "model name: Operator Virtual Core (x86_64)\ncores: 4\n");
 
     // IPC handshake
-    sys_ipc_send(pid_shell, pid_gui, "WINDOW_CREATE: title='Operator Terminal' w=800 h=500");
     sys_ipc_send(pid_db, pid_shell, "DB_STATUS: ready uri='db/operator_system.db'");
 
     // Simulate scheduling passes

@@ -8,8 +8,7 @@ Initializes:
 4. Inbuilt 2GB Dedicated Block Storage Device
 5. Full Networking Subsystem (DNS, Ping, Sockets, Routes)
 6. Java OVM Application Runtime
-7. C++ Cybernetic Desktop Window Manager
-8. Polyglot Script & Shell Subsystem (.sh, .ps1, .bat, .opsh)
+7. Polyglot Script & Shell Subsystem (.sh, .ps1, .bat, .opsh)
 """
 
 import os
@@ -74,12 +73,8 @@ def main():
     p_ovm = subprocess.run(ovm_cmd, cwd=str(ROOT_DIR), capture_output=True, text=True)
     print(p_ovm.stdout.strip())
 
-    # 7. GUI Compositor Announcement
-    log("STAGE 7: GUI-C++", "Desktop compositor ready. Type 'gui' in Operator Shell to open it.")
-    log("STAGE 7: BROWSER", "Browser surface ready. Open it from the desktop when needed.")
-
-    # 8. Start Polyglot Shell
-    log("STAGE 8: SHELL", "Launching Operator Script Shell (supports .sh, .ps1, .bat, .opsh)...\n")
+    # 7. Start Polyglot Shell
+    log("STAGE 7: SHELL", "Launching Operator Script Shell (supports .sh, .ps1, .bat, .opsh)...\n")
     shell_py = ROOT_DIR / "shell" / "opshell.py"
     subprocess.run([sys.executable, str(shell_py)])
 

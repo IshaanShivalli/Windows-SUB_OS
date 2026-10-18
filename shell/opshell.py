@@ -168,6 +168,9 @@ class OperatorShellEngine:
         cmd = tokens[0].lower()
         args = tokens[1:]
 
+        if cmd in ("gui", "browser", "web"):
+            return "[SUBSYSTEM] GUI and browser components have been removed from Operator OS."
+
         # Check script invocation shorthand (e.g. ./demo.sh or demo.bat)
         if cmd.startswith("./") or cmd.endswith((".sh", ".bash", ".ps1", ".bat", ".cmd", ".opsh")):
             script = cmd.lstrip("./")
@@ -218,9 +221,6 @@ class OperatorShellEngine:
     ipconfig               Display IP configuration and adapters
     tree [dir]             Graphically display directory structure
 
-  Browser (Native Rust Engine):
-    browser [url]          Launch native Rust WebView browser (in GUI or standalone)
-
   Script File Execution Engine:
     script.run <file>      Run Linux (.sh), PowerShell (.ps1), Batch (.bat), or Operator (.opsh) files
                            Shorthand: Simply type './myscript.sh' or 'build.bat'
@@ -228,15 +228,6 @@ class OperatorShellEngine:
   Package & System DB:
     pkg.list               Query installed packages from SQL registry
     db.query <sql>         Run raw SQL statement on system database
-
-  GUI Window Manager Control:
-    gui                    Launch Operator C++ Desktop Environment
-    gui focus <1|2|3>      Bring window to front (1=Shell, 2=Storage, 3=Network)
-    gui theme <neon|amber|emerald|purple> Change desktop visual theme
-    gui msg <text>         Broadcast live message to GUI status banner
-    gui minimize <id>      Minimize target window
-    gui restore <id>       Restore target window
-    gui close              Terminate GUI process
 
   Variables & Navigation:
     var.set <k>=<v>        Assign system environment variable
@@ -317,60 +308,6 @@ Image Backing:     {self.storage.img_path.name}
             if not args:
                 return "Usage: script.run <path-to-script-file> [args...]"
             return self.execute_script_file(args[0], args[1:])
-
-        elif cmd == "gui":
-            # Controllable GUI Command Router
-            wm_exe = ROOT_DIR / "bin" / "operator_wm.exe"
-            ipc_file = ROOT_DIR / "gui_command.ipc"
-
-            if not args or args[0] == "start":
-                # Launch GUI Compositor in background if not already running
-                try:
-                    subprocess.Popen([str(wm_exe)], cwd=str(ROOT_DIR))
-                    return "\033[1;32m[GUI ACTIVE]\033[0m Started Operator C++ Desktop Compositor (PID spawned)."
-                except Exception as e:
-                    return f"\033[31m[GUI Launch Error]: {str(e)}\033[0m"
-
-            subaction = args[0].lower()
-            if subaction in ("focus", "select"):
-                target_id = args[1] if len(args) > 1 else "1"
-                ipc_file.write_text(f"FOCUS:{target_id}\n", encoding="utf-8")
-                return f"\033[1;32m[GUI IPC]\033[0m Focused Window ID {target_id}"
-
-            elif subaction == "theme":
-                theme_name = args[1] if len(args) > 1 else "neon"
-                ipc_file.write_text(f"THEME:{theme_name}\n", encoding="utf-8")
-                return f"\033[1;32m[GUI IPC]\033[0m Applied UI Theme '{theme_name}' (neon, amber, emerald, purple)"
-
-            elif subaction in ("msg", "notify", "broadcast"):
-                text = " ".join(args[1:]) if len(args) > 1 else "Ping from opshell"
-                ipc_file.write_text(f"MSG:{text}\n", encoding="utf-8")
-                return f"\033[1;32m[GUI IPC]\033[0m Dispatched status notification to GUI: '{text}'"
-
-            elif subaction == "minimize":
-                target_id = args[1] if len(args) > 1 else "1"
-                ipc_file.write_text(f"MIN:{target_id}\n", encoding="utf-8")
-                return f"\033[1;32m[GUI IPC]\033[0m Minimized Window ID {target_id}"
-
-            elif subaction == "restore":
-                target_id = args[1] if len(args) > 1 else "1"
-                ipc_file.write_text(f"RESTORE:{target_id}\n", encoding="utf-8")
-                return f"\033[1;32m[GUI IPC]\033[0m Restored Window ID {target_id}"
-
-            elif subaction in ("close", "kill", "quit"):
-                os.system("taskkill /IM operator_wm.exe /F >nul 2>&1")
-                return "\033[1;33m[GUI SHUTDOWN]\033[0m Terminated Operator Desktop Window Manager."
-
-            else:
-                return """\033[1;36mControllable GUI Command Syntax:\033[0m
-  gui                    Launch / open desktop GUI
-  gui focus <1|2|3>      Bring window to front (1=Shell, 2=2GB Storage, 3=Network)
-  gui theme <name>       Change theme accent (neon, amber, emerald, purple)
-  gui msg <text>         Broadcast live notification message to GUI titlebar
-  gui minimize <1|2|3>   Minimize window
-  gui restore <1|2|3>    Restore window
-  gui close              Close / terminate GUI window manager
-"""
 
         elif cmd == "drive.status":
             status = self.google_drive.status()
@@ -846,19 +783,6 @@ CompositorEngine          : C++ Window Manager Compositor (Direct GDI Vector UI)
                 for f in files[:8]:
                     lines.append(f"{indent}└── {f}")
             return "\n".join(lines[:35])
-
-        # Browser Launcher Command (Rust WebView Engine)
-        elif cmd in ("browser", "web"):
-            guard_exe = ROOT_DIR / "bin" / "kernel_guard.exe"
-            url_to_open = args[0] if args else None
-            try:
-                cmd_args = [str(guard_exe), "browser"]
-                if url_to_open:
-                    cmd_args.append(url_to_open)
-                subprocess.Popen(cmd_args, cwd=str(ROOT_DIR))
-                return f"\033[1;32m[BROWSER ACTIVE]\033[0m Launched Native Rust WebView Browser Engine (PID spawned)."
-            except Exception as e:
-                return f"\033[31m[Browser Launch Error]: {str(e)}\033[0m"
 
         elif cmd in ("cls", "clear"):
             os.system("cls" if os.name == "nt" else "clear")

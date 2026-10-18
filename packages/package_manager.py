@@ -52,7 +52,7 @@ class PackageManager:
                 "version": "2.1.0",
                 "runtime": "native",
                 "entrypoint": "bin/nano_edit.exe",
-                "deps": ["core.kernel", "core.gui"],
+                "deps": ["core.kernel"],
                 "signature": "SHA256:55018274aee902bb14c",
                 "desc": "Lightweight code and text editor with syntax highlighting"
             }

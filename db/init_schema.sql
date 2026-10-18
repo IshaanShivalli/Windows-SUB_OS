@@ -50,8 +50,6 @@ INSERT OR REPLACE INTO sys_settings (key, value, type, category) VALUES
     ('os.name', 'Operator OS', 'string', 'kernel'),
     ('os.version', '1.0.0-subsystem', 'string', 'kernel'),
     ('os.build', '2026.10', 'string', 'kernel'),
-    ('ui.theme', 'dark_glass', 'string', 'gui'),
-    ('ui.accent_color', '#00f0ff', 'string', 'gui'),
     ('net.dns', '1.1.1.1', 'string', 'network'),
     ('shell.default', 'opshell', 'string', 'shell'),
     ('shell.allow_powershell', 'true', 'bool', 'shell'),
@@ -61,10 +59,8 @@ INSERT OR REPLACE INTO sys_settings (key, value, type, category) VALUES
 -- Seed Core System Packages
 INSERT OR REPLACE INTO sys_packages (id, name, version, runtime, entrypoint, description, author) VALUES
     ('core.kernel', 'Operator Kernel Engine', '1.0.0', 'native', 'bin/operator_kernel.exe', 'Core microkernel & memory manager', 'Operator System Team'),
-    ('core.gui', 'Operator GUI & WM', '1.0.0', 'native', 'bin/operator_wm.exe', 'C++ Desktop Window Manager and Compositor', 'Operator System Team'),
     ('core.shell', 'Operator Polyglot Shell', '1.0.0', 'python', 'shell/opshell.py', 'Hybrid Shell Bridge (Linux/PS/CMD)', 'Operator System Team'),
-    ('core.ovm', 'Operator Java Runtime', '1.0.0', 'java', 'runtime_java/OperatorRuntime.jar', 'OVM Application Lifecycle Framework', 'Operator System Team'),
-    ('core.browser', 'Operator Web Browser', '1.0.0', 'web', 'browser/index.html', 'PHP-accelerated Web Surface', 'Operator System Team');
+    ('core.ovm', 'Operator Java Runtime', '1.0.0', 'java', 'runtime_java/OperatorRuntime.jar', 'OVM Application Lifecycle Framework', 'Operator System Team');
 
 -- Seed Root and Default User
 INSERT OR REPLACE INTO sys_users (uid, username, shell, home_dir, role) VALUES

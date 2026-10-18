@@ -47,9 +47,7 @@ class SubsystemProcessManager:
         p3.mem_mb = 64.0
         p4 = SubsystemProcess(4, "python_shell_subsystem", "python", "shell/opshell.py", "operator", 10)
         p4.mem_mb = 24.2
-        p5 = SubsystemProcess(5, "cpp_compositor_wm", "native (c++)", "bin/operator_wm.exe", "operator", 15)
-        p5.mem_mb = 45.8
-        for p in [p1, p2, p3, p4, p5]:
+        for p in [p1, p2, p3, p4]:
             self.procs[p.pid] = p
 
     def detect_runtime(self, cmd: str) -> str:

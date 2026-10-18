@@ -46,10 +46,8 @@ def main():
     # 5. Core Binaries
     kernel_exe = ROOT_DIR / "bin" / "operator_kernel.exe"
     guard_exe = ROOT_DIR / "bin" / "kernel_guard.exe"
-    wm_exe = ROOT_DIR / "bin" / "operator_wm.exe"
     checks.append(("C Kernel Binary (operator_kernel.exe)", kernel_exe.exists(), str(kernel_exe.name)))
     checks.append(("Rust Guard Binary (kernel_guard.exe)", guard_exe.exists(), str(guard_exe.name)))
-    checks.append(("C++ Window Manager (operator_wm.exe)", wm_exe.exists(), str(wm_exe.name)))
 
     # 6. Storage & Database
     storage_img = ROOT_DIR / "storage" / "operator_storage_2gb.img"
