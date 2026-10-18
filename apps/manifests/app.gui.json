@@ -1,0 +1,11 @@
+{
+  "name": "DesktopCompositor",
+  "app_id": "app.gui",
+  "runtime": "native",
+  "entrypoint": "bin/operator_wm.exe",
+  "permissions": [
+    "display",
+    "ipc"
+  ],
+  "exec_cmd": "bin/operator_wm.exe"
+}

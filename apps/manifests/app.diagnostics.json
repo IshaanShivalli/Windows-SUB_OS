@@ -1,0 +1,11 @@
+{
+  "name": "SysDiagnostics",
+  "app_id": "app.diagnostics",
+  "runtime": "java",
+  "entrypoint": "diagnostics",
+  "permissions": [
+    "hardware",
+    "metrics"
+  ],
+  "exec_cmd": "java -cp runtime_java/bin operator.runtime.OperatorRuntime diagnostics"
+}

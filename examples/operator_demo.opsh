@@ -1,0 +1,10 @@
+# Operator OS Native Script (.opsh)
+# Uses distinct custom command vocabulary
+
+sys.probe
+storage.inspect
+net.ifconfig
+net.resolve google.com
+net.probe google.com 80
+var.set SYSTEM_TIER=ENTERPRISE
+var.get SYSTEM_TIER

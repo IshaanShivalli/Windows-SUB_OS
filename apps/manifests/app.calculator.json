@@ -1,0 +1,11 @@
+{
+  "name": "Calculator",
+  "app_id": "app.calculator",
+  "runtime": "java",
+  "entrypoint": "calculator",
+  "permissions": [
+    "math",
+    "filesystem"
+  ],
+  "exec_cmd": "java -cp runtime_java/bin operator.runtime.OperatorRuntime calculator"
+}

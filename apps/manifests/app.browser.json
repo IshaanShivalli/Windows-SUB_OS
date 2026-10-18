@@ -1,0 +1,11 @@
+{
+  "name": "WebBrowser",
+  "app_id": "app.browser",
+  "runtime": "web",
+  "entrypoint": "browser/index.html",
+  "permissions": [
+    "network",
+    "render"
+  ],
+  "exec_cmd": "start browser/index.html"
+}

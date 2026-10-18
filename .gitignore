@@ -1,0 +1,103 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyd
+.Python
+.venv/
+venv/
+env/
+ENV/
+pip-wheel-metadata/
+.pytest_cache/
+.mypy_cache/
+
+# Build and native artifacts
+build/
+dist/
+out/
+bin/*.exe
+bin/*.dll
+bin/*.pdb
+bin/*.ilk
+bin/*.lib
+bin/*.exp
+bin/*.manifest
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.dll
+*.dylib
+*.pdb
+*.ilk
+*.exp
+
+# Rust
+target/
+kernel/kernel_guard/target/
+kernel/kernel_guard/.git.nested-backup/
+
+# Java
+*.class
+*.jar
+runtime_java/bin/
+
+# Generated application state
+db/*.db
+db/*.db-wal
+db/*.db-shm
+storage/*.img
+storage/*.journal
+storage/storage_metadata.json
+storage/operator_storage_*.img
+storage/opfs_history.journal
+storage/window_states.cfg
+storage/gui_shell_output.txt
+storage/crash_reports/
+storage/logs/
+storage/dev/
+storage/operator_home/
+storage/restore_points/
+storage/__pycache__/
+*.log
+
+# Embedded browser runtime data
+bin/*WebView2/
+bin/EBWebView/
+browser/.cache/
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+*.local
+config/google_drive_oauth.json
+config/google_drive_token.json
+
+# Local credentials and runtime databases
+*.sqlite
+*.sqlite3
+*.db-wal
+*.db-shm
+*.pid
+*.sock
+*.tmp
+
+# Editors and operating systems
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Coverage
+.coverage
+htmlcov/
+coverage.xml
+
+# Bootable image/build output (keep boot_target/boot_builder.py tracked)
+boot_target/*.img
+boot_target/*.iso
+boot_target/*.efi
