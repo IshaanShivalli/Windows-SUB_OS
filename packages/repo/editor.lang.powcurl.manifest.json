@@ -1,0 +1,15 @@
+{
+  "id": "editor.lang.powcurl",
+  "name": "Operator Editor powcurl Extension",
+  "version": "1.0.0",
+  "runtime": "editor-extension",
+  "entrypoint": "apps/nano.py",
+  "deps": ["app.editor"],
+  "signature": "SHA256:17f594b2b53f4c56f436ee0b3df0342d04b68b91",
+  "desc": "powcurl media-script completion for the Operator code editor",
+  "editor_extension": {
+    "language": "powcurl",
+    "file_extensions": [".powcurl"],
+    "completions": ["open", "play", "pause", "resume", "seek", "volume", "wait", "stop"]
+  }
+}

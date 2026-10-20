@@ -1,0 +1,12 @@
+{
+  "id": "app.nano",
+  "name": "Operator Code Editor",
+  "version": "10.0.0",
+  "runtime": "python",
+  "entrypoint": "apps/nano.py",
+  "deps": [
+    "core.shell"
+  ],
+  "signature": "SHA256:77918237190bc981aa1",
+  "desc": "Terminal code editor with syntax highlighting and installable language completion extensions"
+}

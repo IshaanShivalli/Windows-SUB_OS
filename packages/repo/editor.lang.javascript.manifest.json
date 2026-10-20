@@ -1,0 +1,15 @@
+{
+  "id": "editor.lang.javascript",
+  "name": "Operator Editor JavaScript Extension",
+  "version": "1.0.0",
+  "runtime": "editor-extension",
+  "entrypoint": "apps/nano.py",
+  "deps": ["app.editor"],
+  "signature": "SHA256:ec87472db4e230c0528e8fa61ca447ee3acba7b1",
+  "desc": "JavaScript syntax completion for the Operator code editor",
+  "editor_extension": {
+    "language": "JavaScript",
+    "file_extensions": [".js", ".mjs", ".cjs"],
+    "completions": ["async", "await", "break", "case", "catch", "class", "const", "continue", "debugger", "default", "delete", "do", "else", "export", "extends", "false", "finally", "for", "from", "function", "if", "import", "in", "instanceof", "let", "new", "null", "of", "return", "static", "super", "switch", "this", "throw", "true", "try", "typeof", "undefined", "var", "void", "while", "yield", "console", "document", "window", "Promise", "Array", "Object", "String", "Number", "JSON"]
+  }
+}

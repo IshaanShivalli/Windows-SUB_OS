@@ -1,0 +1,15 @@
+{
+  "id": "editor.lang.powershell",
+  "name": "Operator Editor PowerShell Extension",
+  "version": "1.0.0",
+  "runtime": "editor-extension",
+  "entrypoint": "apps/nano.py",
+  "deps": ["app.editor"],
+  "signature": "SHA256:5a2ab43d035a21a7e93d179b45e5cbcae867dd21",
+  "desc": "PowerShell syntax completion for the Operator code editor",
+  "editor_extension": {
+    "language": "PowerShell",
+    "file_extensions": [".ps1", ".psm1", ".psd1"],
+    "completions": ["begin", "break", "catch", "class", "continue", "data", "define", "do", "dynamicparam", "else", "elseif", "end", "enum", "exit", "filter", "finally", "for", "foreach", "from", "function", "if", "in", "param", "process", "return", "switch", "throw", "trap", "try", "until", "using", "var", "while", "workflow", "Write-Host", "Write-Output", "Get-Content", "Set-Content", "Get-ChildItem", "Where-Object", "ForEach-Object", "Select-Object"]
+  }
+}

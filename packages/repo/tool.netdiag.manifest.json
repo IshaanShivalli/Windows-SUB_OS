@@ -1,0 +1,12 @@
+{
+  "id": "tool.netdiag",
+  "name": "Network Socket Analyzer",
+  "version": "1.0.4",
+  "runtime": "python",
+  "entrypoint": "network/net_stack.py",
+  "deps": [
+    "core.shell"
+  ],
+  "signature": "SHA256:aa918237190bc981df2",
+  "desc": "Interface probing and deep packet latency telemetry"
+}

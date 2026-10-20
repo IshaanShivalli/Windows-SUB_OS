@@ -2,6 +2,7 @@ import hashlib
 import os
 import json
 import sqlite3
+from contextlib import closing
 from pathlib import Path
 from typing import Optional, Dict, List
 
@@ -38,7 +39,7 @@ class SecurityManager:
 
     def seed_users_and_secrets(self):
         if DB_PATH.exists():
-            with sqlite3.connect(DB_PATH) as conn:
+            with closing(sqlite3.connect(DB_PATH)) as conn:
                 conn.execute("""
                     CREATE TABLE IF NOT EXISTS sys_auth (
                         username TEXT PRIMARY KEY,
@@ -47,11 +48,11 @@ class SecurityManager:
                         salt TEXT NOT NULL
                     )
                 """)
-                # Seed root (pass: toor) and operator (pass: operator)
+                # Seed initial accounts only; never overwrite credentials on startup.
                 h_root = self.hash_password("toor")
                 h_user = self.hash_password("operator")
-                conn.execute("INSERT OR REPLACE INTO sys_auth VALUES ('root', ?, 'root', 'OP_SEC_SALT_2026')", (h_root,))
-                conn.execute("INSERT OR REPLACE INTO sys_auth VALUES ('operator', ?, 'user', 'OP_SEC_SALT_2026')", (h_user,))
+                conn.execute("INSERT OR IGNORE INTO sys_auth VALUES ('root', ?, 'root', 'OP_SEC_SALT_2026')", (h_root,))
+                conn.execute("INSERT OR IGNORE INTO sys_auth VALUES ('operator', ?, 'user', 'OP_SEC_SALT_2026')", (h_user,))
                 conn.commit()
 
         # Seed initial secret vault entries (AES/SHA simulated storage)

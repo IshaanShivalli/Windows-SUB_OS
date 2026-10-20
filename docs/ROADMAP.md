@@ -16,7 +16,7 @@ The project already has a strong subsystem demo. The following additions would m
 - Add true per-application resize handles and snap layouts
 - Replace GUI shell output redirection with a persistent shell service and IPC stream
 - Add clickable File Manager navigation and safe copy/move/delete operations
-- Add Google Drive sync status, conflict handling, and offline placeholders
+- Extend Google Drive's on-demand mount with remote change detection, conflict handling, and offline placeholders
 
 ## Core OS capabilities
 

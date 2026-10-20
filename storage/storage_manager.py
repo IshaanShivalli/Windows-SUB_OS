@@ -45,17 +45,152 @@ class OperatorStorageManager:
         OS_ROOT_PATH.mkdir(parents=True, exist_ok=True)
         return OS_ROOT_PATH
 
-    def init_os_folders(self):
-        """Create the private, visible-to-Operator home tree for the subsystem."""
+    def create_user_hierarchy(self, username: str):
+        """Provision the required isolated user folder structure in the 2GB storage:
+        Users/
+            username/
+                home/
+                    Documents/
+                    Downloads/
+                    Pictures/
+                    Videos/
+                    Games/
+                Google Drive/
+        """
         os_root = self.get_os_root()
-        folders = [
-            "etc", "var/log", "var/lib", "var/cache", "tmp", "home/operator/Docs",
-            "home/operator/Downloads", "home/operator/Pictures", "home/operator/Videos",
-            "home/operator/Google Drive/Docs", "home/operator/Google Drive/Videos",
-            "home/operator/Google Drive/Pictures"
+        user_root = os_root / "Users" / username
+        subfolders = [
+            user_root / "home" / "Documents",
+            user_root /             "home" / "Downloads",
+            user_root / "home" / "Pictures",
+            user_root / "home" / "Videos",
+            user_root / "home" / "Games",
+            user_root / "Google Drive",
         ]
-        for folder in folders:
+        for folder in subfolders:
+            folder.mkdir(parents=True, exist_ok=True)
+
+        # Place initial welcome files if not existing
+        readme = user_root / "home" / "Documents" / "welcome.txt"
+        if not readme.exists():
+            readme.write_text(
+                f"Welcome to Atlas OS, {username}!\n"
+                f"Your home storage is securely isolated in the dedicated 2GB block device.\n"
+                f"Use 'nano <filename>' to create or edit files.\n",
+                encoding="utf-8"
+            )
+
+    def delete_user_hierarchy(self, username: str):
+        """Clean up user folder hierarchy from the 2GB storage."""
+        import shutil
+        os_root = self.get_os_root()
+        user_root = os_root / "Users" / username
+        if user_root.exists() and user_root.is_dir():
+            shutil.rmtree(user_root, ignore_errors=True)
+
+    def init_os_folders(self):
+        """Create the private OS filesystem tree inside the 2GB storage."""
+        os_root = self.get_os_root()
+        base_folders = [
+            "etc", "var/log", "var/lib", "var/cache", "tmp", "bin", "Users"
+        ]
+        for folder in base_folders:
             (os_root / folder).mkdir(parents=True, exist_ok=True)
+
+        # Initialize default users
+        self.create_user_hierarchy("operator")
+        self.create_user_hierarchy("root")
+
+    def normalize_vpath(self, vpath: str, cwd: str = "/", current_user: str = "operator") -> str:
+        """Normalizes a virtual OS path relative to cwd (POSIX-style)."""
+        clean_vpath = vpath.replace("\\", "/").strip()
+        clean_cwd = cwd.replace("\\", "/").strip()
+        if not clean_cwd.startswith("/"):
+            clean_cwd = "/" + clean_cwd
+
+        if clean_vpath == "~":
+            clean_vpath = f"/Users/{current_user}/home"
+        elif clean_vpath.startswith("~/"):
+            clean_vpath = f"/Users/{current_user}/home" + clean_vpath[1:]
+
+        if clean_vpath.startswith("/"):
+            target = clean_vpath
+        else:
+            target = f"{clean_cwd.rstrip('/')}/{clean_vpath}"
+
+        parts = []
+        for segment in target.split("/"):
+            if not segment or segment == ".":
+                continue
+            elif segment == "..":
+                if parts:
+                    parts.pop()
+            else:
+                parts.append(segment)
+
+        return "/" + "/".join(parts)
+
+    def resolve_vpath(self, vpath: str, cwd: str = "/", current_user: str = "operator") -> tuple:
+        """
+        Translates a virtual path into an actual physical path inside the 2GB OS storage.
+        Returns: (physical_path: Path, normalized_vpath: str)
+        """
+        norm_vpath = self.normalize_vpath(vpath, cwd, current_user)
+        os_root = self.get_os_root()
+
+        # Map root / to os_root
+        rel = norm_vpath.lstrip("/")
+        phys = (os_root / rel).resolve() if rel else os_root.resolve()
+
+        # Security check: Ensure phys is within os_root
+        try:
+            phys.relative_to(os_root.resolve())
+        except ValueError:
+            phys = os_root.resolve()
+            norm_vpath = "/"
+
+        return phys, norm_vpath
+
+    def virtual_exists(self, vpath: str, cwd: str = "/", current_user: str = "operator") -> bool:
+        phys, _ = self.resolve_vpath(vpath, cwd, current_user)
+        return phys.exists()
+
+    def virtual_isdir(self, vpath: str, cwd: str = "/", current_user: str = "operator") -> bool:
+        phys, _ = self.resolve_vpath(vpath, cwd, current_user)
+        return phys.is_dir()
+
+    def virtual_listdir(self, vpath: str = "/", cwd: str = "/", current_user: str = "operator") -> list:
+        phys, norm = self.resolve_vpath(vpath, cwd, current_user)
+        if not phys.exists() or not phys.is_dir():
+            return []
+        items = []
+        for entry in sorted(phys.iterdir(), key=lambda e: (not e.is_dir(), e.name.lower())):
+            st = entry.stat()
+            items.append({
+                "name": entry.name,
+                "is_dir": entry.is_dir(),
+                "size": st.st_size if not entry.is_dir() else 0,
+                "mtime": st.st_mtime,
+                "vpath": f"{norm.rstrip('/')}/{entry.name}"
+            })
+        return items
+
+    def virtual_mkdir(self, vpath: str, cwd: str = "/", current_user: str = "operator"):
+        phys, _ = self.resolve_vpath(vpath, cwd, current_user)
+        phys.mkdir(parents=True, exist_ok=True)
+
+    def virtual_remove(self, vpath: str, cwd: str = "/", current_user: str = "operator") -> bool:
+        import shutil
+        phys, norm = self.resolve_vpath(vpath, cwd, current_user)
+        if norm == "/":
+            return False
+        if phys.is_dir():
+            shutil.rmtree(phys, ignore_errors=True)
+            return True
+        elif phys.is_file():
+            phys.unlink(missing_ok=True)
+            return True
+        return False
 
     def get_disk_info(self):
         size_on_disk = self.img_path.stat().st_size if self.img_path.exists() else 0

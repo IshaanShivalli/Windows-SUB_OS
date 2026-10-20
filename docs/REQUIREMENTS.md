@@ -19,23 +19,49 @@ The project is currently host-assisted and is not a bootable ISO or bare-metal o
 - A C compiler such as MSVC Build Tools or MinGW-w64
 - A C++ compiler such as MSVC Build Tools or MinGW-w64
 
-PowerShell, `cmd.exe`, and WSL/Bash are optional integrations used by the polyglot shell. They are not required for Python-only commands.
+PowerShell, `cmd.exe`, and WSL/Bash are optional integrations used by the polyglot shell. They are not required for Python-only commands. The `ssh` client command requires the host OpenSSH client (`ssh.exe`) on `PATH`; the Atlas SSH server uses its Python dependency and does not require the Windows `sshd` service.
 
 ## Python dependencies
 
-The current Python implementation uses only the standard library. Install the requirements file with:
+The shell and core subsystems primarily use the standard library. The `paramiko` dependency enables the Atlas SSH server; Google API packages enable the optional Drive integration. Install the packages listed in `requirements.txt`:
 
 ```powershell
 python -m pip install -r requirements.txt
 ```
 
-No third-party package is currently required.
+Google Drive is optional. Install the Google API packages from
+`requirements.txt`, configure a Google OAuth Desktop client ID with the Drive
+API enabled, and run `drive.mount` in Operator Shell. The command asks for the
+client ID and opens Google's sign-in page; it never requests the Google
+account password. OAuth token exchange and refresh use the Operator network
+stack. The authenticated account mounts at `/Users/<user>/Google Drive`.
+Remote files are listed with `drive.ls` and downloaded on demand with
+`drive.download <file-id>`. Uploads and automatic new/modified-file sync are
+disabled until a separate local passphrase is set/unlocked; that write session
+expires after three hours. Google OAuth tokens are stored in that user's
+private Operator OS home directory, outside the repository.
 
-Google Drive is optional. Install the Google packages from `requirements.txt`,
-then run `drive.connect` in Operator Shell. Boot never authenticates or asks
-for credentials. The runtime command asks for the OAuth client JSON path,
-opens the Google authorization page, and creates only `Operator OS/Pictures`,
-`Operator OS/Videos`, and `Operator OS/Docs`.
+The terminal code editor uses the installed `prompt_toolkit` and Pygments
+dependencies. Language autocomplete is optional and activated per file type
+by installing an editor extension package, for example
+`pkg.install editor.lang.python`.
+
+Powcurl requires a Windows x64 FFmpeg distribution with `ffplay.exe` on `PATH`
+(or the `OPERATOR_FFPLAY` environment variable set to its full path). Hardware
+decoding requires an FFplay build that supports `-hwaccel auto`; otherwise
+playback continues with CPU decoding and reports that fallback. MP3, WAV, MP4,
+AVI, and animated GIF playback depends on the codecs enabled in that FFmpeg
+build. The Rust runtime links its C Win32 backend during the Cargo build.
+
+## Installed games
+
+The default `operator` user's `/Users/operator/home/Games` folder contains
+fused Windows x64 LÖVE2D 11.5 game executables. Their licenses and credits are
+in `Games/licenses`. Operator OS installs only the game `.exe` files, as
+requested; those executables still require the matching LÖVE runtime DLLs
+beside them. The complete runnable distributions (executables plus runtime
+DLLs and notices) are kept in each project's `CS50 2D/<game>/dist` directory.
+Installed game binaries and user OS storage are excluded from Git.
 
 ## Build inputs
 

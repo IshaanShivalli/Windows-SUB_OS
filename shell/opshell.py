@@ -8,6 +8,8 @@ Key Features:
    - Bash/Linux Shell Scripts (.sh, .bash) via Linux/WSL runtime
    - PowerShell Scripts (.ps1) via PowerShell runtime
    - Command Prompt Batch Scripts (.bat, .cmd) via CMD runtime
+   - Java source files (.java) via the Operator Java runtime
+   - C source files (.c) via the Operator native toolchain
    - Operator OS Script Files (.opsh, .ops) via Native Operator Grammar
 2. Distinct Custom Command Vocabulary (Different from standard shells):
    - `sys.probe`           -> Probe hardware, kernel, memory, 2GB disk, and scheduler
@@ -18,6 +20,7 @@ Key Features:
    - `net.probe <host>`    -> Latency probe & port ping
    - `net.fetch <url>`     -> Network HTTP socket fetcher
    - `script.run <file>`   -> Polyglot script executor (detects .sh, .ps1, .bat, .opsh)
+   - `powcurl <file>`      -> Run a Rust/C media playback script
    - `pkg.list`            -> Registry query of installed OS packages
    - `pkg.install <name>`  -> Install new package definition
    - `db.query <sql>`      -> Run direct SQL queries against OS registry
@@ -28,12 +31,24 @@ Key Features:
 
 import os
 import sys
+import io
 import subprocess
+import shutil
 import shlex
 import sqlite3
 import re
 import time
+import fnmatch
+import copy
+from typing import Optional
 from pathlib import Path
+
+if hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 DB_PATH = ROOT_DIR / "db" / "operator_system.db"
@@ -41,6 +56,7 @@ sys.path.insert(0, str(ROOT_DIR))
 
 from storage.storage_manager import OperatorStorageManager
 from network.net_stack import OperatorNetworkStack
+from network.ssh_service import OperatorSSHService
 from integrations.google_drive import GoogleDriveManager
 from core.process.process_manager import RealProcessManager
 from core.process.subsystem_proc_mgr import SubsystemProcessManager
@@ -56,12 +72,111 @@ from core.logger.central_logger import CentralLogger
 from core.reliability.reliability_manager import ReliabilityManager
 from core.devtools.dev_tools import DeveloperTools
 from boot_target.boot_builder import BootableTargetBuilder
+from pow.engine import PowEngine
+from core.gpu.gpu_manager import GPUManager
+from apps.nano import OperatorCodeEditor
+from core.security.user_manager import UserManager
+from core.memory.user_memory_manager import UserMemoryManager
+
+from rich.console import Console
+from rich.table import Table
+from rich.panel import Panel
+from rich.text import Text
+from rich.box import ROUNDED
+from prompt_toolkit import PromptSession
+from prompt_toolkit.completion import Completer, Completion
+from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
+from prompt_toolkit.history import InMemoryHistory
+from prompt_toolkit.formatted_text import ANSI
+
+
+class AtlasCompleter(Completer):
+    def __init__(self, commands: list, get_cwd_func, storage_mgr):
+        self.commands = sorted(commands)
+        self.get_cwd = get_cwd_func
+        self.storage = storage_mgr
+
+    def get_completions(self, document, complete_event):
+        text = document.text_before_cursor
+        words = text.split()
+        if len(words) <= 1 and not text.endswith(" "):
+            prefix = words[0] if words else ""
+            for cmd in self.commands:
+                if cmd.lower().startswith(prefix.lower()):
+                    yield Completion(cmd, start_position=-len(prefix))
+        else:
+            prefix = words[-1] if not text.endswith(" ") else ""
+            command = words[0].lower() if words else ""
+            command_position = 1
+            if command == "passd" and len(words) >= 2 and words[1] == "-u":
+                command_position = 3
+            is_privileged_command = command in ("passd", "sudo")
+            is_privileged_command_word = is_privileged_command and (
+                len(words) <= command_position
+                or (len(words) == command_position + 1 and not text.endswith(" "))
+            )
+            is_ssh_server_command_word = command == "ssh.server" and (
+                len(words) <= 1
+                or (len(words) == 2 and not text.endswith(" "))
+            )
+            if is_privileged_command_word:
+                if (
+                    command == "passd"
+                    and command_position == 1
+                    and "setup".startswith(prefix.lower())
+                ):
+                    yield Completion("setup", start_position=-len(prefix))
+                for candidate in self.commands:
+                    if " " not in candidate and candidate.lower().startswith(prefix.lower()):
+                        yield Completion(candidate, start_position=-len(prefix))
+                return
+            if is_ssh_server_command_word:
+                for candidate in ("start", "status", "stop"):
+                    if candidate.startswith(prefix.lower()):
+                        yield Completion(candidate, start_position=-len(prefix))
+                return
+
+            quote = ""
+            raw_prefix = prefix
+            if prefix.startswith('"') or prefix.startswith("'"):
+                quote = prefix[0]
+                raw_prefix = prefix[1:]
+
+            cwd = self.get_cwd()
+            search_vdir = cwd
+            match_prefix = raw_prefix
+            directory_prefix = ""
+            separator_index = max(raw_prefix.rfind("/"), raw_prefix.rfind("\\"))
+            if separator_index >= 0:
+                directory_prefix = raw_prefix[:separator_index + 1]
+                rel_vdir = raw_prefix[:separator_index]
+                match_prefix = raw_prefix[separator_index + 1:]
+                if not rel_vdir and directory_prefix:
+                    search_vdir = "/"
+                else:
+                    search_vdir = self.storage.normalize_vpath(rel_vdir, cwd)
+
+            try:
+                entries = self.storage.virtual_listdir(search_vdir, cwd)
+                for entry in entries:
+                    ename = entry["name"]
+                    if ename.lower().startswith(match_prefix.lower()):
+                        disp = ename + ("/" if entry["is_dir"] else "")
+                        if " " in disp and not quote:
+                            disp = f'"{disp}"'
+                        yield Completion(
+                            directory_prefix + disp,
+                            start_position=-len(raw_prefix),
+                        )
+            except Exception:
+                pass
+
 
 class OperatorShellEngine:
     def __init__(self):
         self.storage = OperatorStorageManager()
         self.network = OperatorNetworkStack()
-        self.google_drive = GoogleDriveManager()
+        self.google_drive = GoogleDriveManager(self.network, self.storage)
         self.proc_mgr = RealProcessManager()
         self.sub_proc_mgr = SubsystemProcessManager()
         self.security = SecurityManager()
@@ -76,14 +191,32 @@ class OperatorShellEngine:
         self.reliability = ReliabilityManager()
         self.devtools = DeveloperTools()
         self.boot_builder = BootableTargetBuilder()
+        self.gpu = GPUManager()
+        self.pow = PowEngine(ROOT_DIR, operator_runner=self.eval_command)
+        self.user_mgr = UserManager()
+        self.mem_mgr = UserMemoryManager()
+        self._passd_auth_cache = {}
+        self.ssh_service = OperatorSSHService(self.storage, self.user_mgr, self._make_remote_shell)
+
+        active_u = self.user_mgr.active_user or "operator"
         self.variables = {
-            "SYS.OS": "Operator OS",
+            "SYS.OS": "Atlas OS",
             "SYS.VER": "2.0.0-PRO",
             "SYS.ARCH": "x86_64-subsystem",
-            "SYS.USER": "operator",
-            "SYS.CWD": os.getcwd(),
+            "SYS.USER": active_u,
+            "SYS.CWD": f"/Users/{active_u}/home",
         }
         self.init_db()
+        try:
+            self.completer = AtlasCompleter(self.get_command_list(), lambda: self.variables["SYS.CWD"], self.storage)
+            self.prompt_session = PromptSession(
+                history=InMemoryHistory(),
+                auto_suggest=AutoSuggestFromHistory(),
+                complete_while_typing=True,
+            )
+        except Exception:
+            self.completer = None
+            self.prompt_session = None
 
     def init_db(self):
         DB_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -92,10 +225,59 @@ class OperatorShellEngine:
             with sqlite3.connect(DB_PATH) as conn:
                 conn.executescript(schema_file.read_text(encoding="utf-8"))
 
-    def get_prompt(self):
+    def get_command_list(self):
+        return [
+            "help", "nano", "edit", "pico", "sys.probe", "storage.inspect", "proc.list", "proc.top",
+            "proc.start", "proc.stop", "proc.kill", "proc.info", "net.ifconfig", "net.routes",
+            "net.resolve", "net.probe", "net.fetch", "drive.mount", "drive.ls", "drive.upload", "drive.download",
+            "ssh", "ssh.server", "ssh.key.add", "ssh.key.list", "ssh.key.remove",
+            "drive.status", "drive.connect", "drive.write.setup", "drive.write.unlock", "auth.login",
+            "auth.whoami", "sec.firewall", "pkg.list", "pkg.avail", "pkg.install", "pkg.uninstall",
+            "pkg.rollback", "fs.mount", "fs.list", "fs.vlist", "fs.copy", "fs.move", "fs.delete",
+            "fs.remove", "fs.goto", "app.list", "app.launch", "app.close", "service.list",
+            "service.start", "service.stop", "settings.list", "settings.set", "win.clip", "win.notify",
+            "win.exec", "log.show", "log.clear", "system.health", "srv.list", "srv.start", "srv.stop",
+            "srv.logs", "rel.restore", "rel.health", "dev.test", "dev.trace", "dev.build", "boot.iso",
+            "pow", "pow.exec", "gpu.probe", "gpu.compute", "gpu.active", "gpu.ai", "db.query", "var.set", "var.get", "cd", "ls",
+            "pwd", "cat", "touch", "grep", "head", "tail", "find", "du", "stat", "file", "basename", "dirname", "realpath", "sort", "uniq", "cut", "tr", "echo", "true", "false", "which", "ll", "la", "env", "printenv", "hostname", "id", "df", "free", "mem", "uname", "uptime", "wc", "mkdir", "rm", "del",
+            "user.list", "user.create", "user.delete", "user.login", "user.switch", "user.whoami",
+            "user.memory", "useradd", "userdel", "login", "su", "whoami", "users", "mem.user",
+            "get-process", "ps", "get-service", "get-date", "date", "test-connection", "ping",
+            "get-computerinfo", "ver", "systeminfo", "ipconfig", "tree", "dir", "type", "cls",
+            "clear", "exit", "quit", "script.run", "powcurl",
+            # passd (Atlas OS superuser privileged execution - replaces sudo)
+            "passd", "passd.setup",
+            # File operations
+            "cp", "copy", "mv", "move", "rmdir", "md", "rd", "rename", "ren",
+            # Linux & Mac utilities
+            "sw_vers", "open", "pbcopy", "pbpaste", "say", "cal", "alias", "history", "watch",
+            # Windows / CMD / PowerShell utilities
+            "winver", "tasklist", "taskkill", "kill", "netstat", "whoami /all",
+            "restart-computer", "stop-computer", "shutdown", "reboot"
+        ]
+
+    def _make_remote_shell(self, username):
+        remote_shell = copy.copy(self)
+        remote_shell.variables = self.variables.copy()
+        remote_shell.variables["SYS.USER"] = username
+        remote_shell.variables["SYS.CWD"] = f"/Users/{username}/home"
+        remote_shell._passd_auth_cache = {}
+        return remote_shell
+
+    def get_prompt_text(self):
         user = self.variables.get("SYS.USER", "operator")
-        cwd = os.path.basename(self.variables.get("SYS.CWD", "/")) or "/"
-        return f"\033[1;35mop-subsystem\033[0m:\033[1;36m{user}\033[0m[\033[1;32m{cwd}\033[0m] » "
+        vpath = self.variables.get("SYS.CWD", f"/Users/{user}/home")
+        home = f"/Users/{user}/home"
+        if vpath == home:
+            display_path = "~"
+        elif vpath.startswith(home + "/"):
+            display_path = "~" + vpath[len(home):]
+        else:
+            display_path = vpath
+        return f"\033[1;36m⚡ atlas\033[0m » \033[1;32m{user}@subsystem\033[0m [\033[1;33m{display_path}\033[0m] \033[1;35m❯\033[0m "
+
+    def get_prompt(self):
+        return self.get_prompt_text()
 
     def execute_script_file(self, script_path_str: str, args: list = None):
         """
@@ -103,6 +285,8 @@ class OperatorShellEngine:
         - .sh, .bash  -> Linux / WSL
         - .ps1        -> PowerShell
         - .bat, .cmd  -> Windows CMD
+        - .java       -> javac + Operator Java runtime
+        - .c          -> gcc/clang native execution
         - .opsh, .ops -> Operator Native Shell Script
         """
         args = args or []
@@ -139,6 +323,43 @@ class OperatorShellEngine:
                 res = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
                 return (res.stdout + res.stderr).strip()
 
+            elif ext == ".java":
+                # Compile Java sources into the Operator-owned runtime area.
+                java_out = self.storage.get_os_root() / "tmp" / "java"
+                java_out.mkdir(parents=True, exist_ok=True)
+                compile_res = subprocess.run(
+                    ["javac", "-d", str(java_out), abs_str],
+                    capture_output=True, text=True, timeout=60,
+                )
+                if compile_res.returncode != 0:
+                    return (compile_res.stdout + compile_res.stderr).strip()
+                class_name = script_path.stem
+                run_res = subprocess.run(
+                    ["java", "-cp", str(java_out), class_name] + args,
+                    capture_output=True, text=True, timeout=60,
+                )
+                return (run_res.stdout + run_res.stderr).strip()
+
+            elif ext == ".c":
+                # Compile C sources into an Operator-owned temporary binary.
+                c_out = self.storage.get_os_root() / "tmp" / "native"
+                c_out.mkdir(parents=True, exist_ok=True)
+                binary = c_out / (script_path.stem + (".exe" if os.name == "nt" else ""))
+                compiler = shutil.which("gcc") or shutil.which("clang")
+                if not compiler:
+                    return "[C Runtime Error] gcc or clang was not found on the host."
+                compile_res = subprocess.run(
+                    [compiler, "-O2", abs_str, "-o", str(binary)],
+                    capture_output=True, text=True, timeout=60,
+                )
+                if compile_res.returncode != 0:
+                    return (compile_res.stdout + compile_res.stderr).strip()
+                run_res = subprocess.run(
+                    [str(binary)] + args,
+                    capture_output=True, text=True, timeout=60,
+                )
+                return (run_res.stdout + run_res.stderr).strip()
+
             elif ext in (".opsh", ".ops"):
                 # Run line by line through Operator Shell Engine
                 content = script_path.read_text(encoding="utf-8")
@@ -150,10 +371,453 @@ class OperatorShellEngine:
                 return "\n".join(outputs)
 
             else:
-                return f"\033[31m[Script Error]: Unsupported script file extension '{ext}'. (Supports .sh, .bash, .ps1, .bat, .cmd, .opsh)\033[0m"
+                return f"\033[31m[Script Error]: Unsupported script file extension '{ext}'. (Supports .sh, .bash, .ps1, .bat, .cmd, .java, .c, .opsh)\033[0m"
 
         except Exception as e:
             return f"\033[31m[Script Runtime Exception]: {str(e)}\033[0m"
+
+    def format_help(self):
+        buf = io.StringIO()
+        c = Console(file=buf, force_terminal=True, width=95)
+        title = Text("ATLAS OS SUBSYSTEM COMMAND REFERENCE (v2.0-PRO)", style="bold cyan")
+        c.print(Panel(title, border_style="cyan", box=ROUNDED))
+
+        categories = [
+            ("Core System & Diagnostics", "cyan", [
+                ("sys.probe", "Comprehensive kernel, CPU, scheduler & storage telemetry"),
+                ("mem / free", "Show live physical RAM and swap usage"),
+                ("gpu.probe", "Show detected GPU hardware and host driver status"),
+                ("system.health", "Live subsystem reliability and health check"),
+                ("proc.list / proc.top", "Active process CPU, memory, and runtime monitor"),
+                ("proc.start <name> <cmd>", "Spawn a managed subsystem background process"),
+                ("proc.stop / proc.kill <pid>", "Terminate or signal active processes"),
+            ]),
+            ("Inbuilt Editor & Development", "green", [
+                ("nano [file]", "Open Operator's code editor"),
+                ("pkg.install editor.lang.<language>", "Install editor autocomplete for a language"),
+                ("script.run <file>", "Polyglot script executor (.sh, .ps1, .bat, .opsh)"),
+                ("powcurl <file.powcurl>", "Run a Rust/C media playback script"),
+                ("dev.test / dev.trace", "Subsystem developer tools and syscall tracing"),
+            ]),
+            ("Atlas Security & Privileges (passd)", "bold red", [
+                ("passd <command>", "Execute command with elevated superuser (root) privileges"),
+                ("passd -u <user> <cmd>", "Execute command as a specific user identity"),
+                ("passd.setup", "Create/change the separate passd password"),
+                ("sudo (blocked)", "Informs user to use 'passd' for Atlas OS security"),
+            ]),
+            ("Storage & Filesystem (2GB Block DEV)", "yellow", [
+                ("storage.inspect", "Inspect 2GB raw block storage device & partition mapping"),
+                ("fs.list / dir [path]", "List virtual & host directory objects with telemetry"),
+                ("fs.mount <host> <vfs>", "Mount host Windows filesystem into VFS namespace"),
+                ("cp / copy [-r] <src> <dst>", "Copy files and directories inside virtual storage"),
+                ("mv / move <src> <dst>", "Move or rename files and directories"),
+                ("rmdir / rd <dir>", "Remove empty directory inside virtual storage"),
+                ("rename / ren <src> <dst>", "Rename file or folder"),
+                ("df -h", "Filesystem disk space usage and mount point status"),
+                ("cd <dir> / pwd", "Navigate and display virtual current working directory"),
+                ("mkdir / md <dir>", "Create directory inside 2GB storage partition"),
+                ("rm / del <path>", "Delete file or wildcard path inside 2GB storage"),
+                ("tree [path]", "Display visual directory tree of user hierarchy"),
+            ]),
+            ("Multi-User & Memory Management", "bright_yellow", [
+                ("user.list / users", "Enumerate users, dedicated RAM & quota status"),
+                ("passd user.create <u...>", "Create user, setup hierarchy & allocate memory (passd)"),
+                ("passd user.delete <name>", "Delete user, purge files & reclaim memory pool (passd)"),
+                ("user.login <name> <pass>", "Authenticate and switch active user session"),
+                ("user.switch / su <name>", "Switch active user session context"),
+                ("user.whoami / whoami", "Show current active user and session role"),
+                ("user.memory / mem.user [name]", "Telemetry on dedicated memory pool & virtual pages"),
+            ]),
+            ("Networking & Connectivity", "magenta", [
+                ("net.ifconfig", "Display network interfaces (lo0, op_eth0, virtio_net)"),
+                ("net.routes", "Display kernel routing table and gateways"),
+                ("net.resolve <host>", "Query host DNS resolution"),
+                ("net.probe <host> [port]", "Measure TCP port latency and ping host"),
+                ("net.fetch <url>", "HTTP socket fetcher and previewer"),
+                ("ssh <user@host> [command]", "Connect with the host OpenSSH client"),
+                ("ssh.server start|status|stop", "Manage the key-authenticated Atlas-only SSH server"),
+                ("ssh.key.add <user> <public-key-file>", "Authorize an Ed25519 key for an Atlas account"),
+                ("ssh.key.list [user]", "List fingerprints of authorized Atlas SSH keys"),
+                ("ssh.key.remove <user> <fingerprint>", "Revoke an authorized Atlas SSH key"),
+                ("drive.mount / drive.status", "Connect and inspect your per-user Google Drive mount"),
+                ("drive.ls [folder-id]", "List files in the mounted Google Drive account"),
+                ("drive.download <file-id>", "Download a Drive file into the current user's Drive folder"),
+                ("drive.upload <path>", "Upload a local Drive mount file after unlocking writes"),
+                ("drive.write.setup / drive.write.unlock", "Protect automatic uploads with a local passphrase"),
+                ("netstat", "Display active network connections and listening ports"),
+                ("ping / test-connection", "Host ping diagnostics"),
+            ]),
+            ("Linux / POSIX Utilities", "bright_cyan", [
+                ("ls / ll / la", "POSIX directory listing with flags (-l, -a, -lh)"),
+                ("cat / type <file>", "Display file content"),
+                ("touch <file>", "Create empty file or touch timestamp"),
+                ("grep <pattern> <file>", "Search text with regex syntax highlighting"),
+                ("head / tail [-n count] <file>", "Output first or last lines of file"),
+                ("sort / uniq / cut / tr", "Text stream filtering and column manipulation"),
+                ("find <path> -name <glob>", "Search for files recursively"),
+                ("stat / file / du <path>", "File metadata, type identification, and disk usage"),
+                ("cal [month] [year]", "Display full terminal calendar"),
+                ("history / alias", "List past command history and registered shell aliases"),
+                ("watch [-n sec] <cmd>", "Run command repeatedly and display periodic output"),
+                ("mem / free [-h]", "Show live host RAM and swap usage"),
+                ("uname [-a]", "Show kernel architecture and release"),
+                ("uptime / wc <file>", "Subsystem uptime and word/byte counter"),
+            ]),
+            ("macOS Subsystem Bridges", "bright_blue", [
+                ("sw_vers", "Print macOS subsystem bridge product and build version"),
+                ("open <file|url>", "Open file, document, or web URL"),
+                ("pbcopy / pbpaste", "Mac clipboard copy and paste utilities"),
+                ("say <text>", "Terminal speech synthesizer output"),
+            ]),
+            ("Windows & Subsystem Integration", "bright_white", [
+                ("winver", "Display Windows subsystem OS build and workstation edition"),
+                ("tasklist / ps", "List running processes and memory consumption"),
+                ("passd taskkill / kill <pid>", "Terminate process by PID (requires passd)"),
+                ("win.clip [text]", "Read from or write to Windows host clipboard"),
+                ("win.notify <title> <msg>", "Dispatch native Windows toast notification"),
+                ("win.exec <app>", "Launch native Windows host applications (calc, notepad)"),
+                ("passd shutdown / reboot", "Subsystem power state transitions (requires passd)"),
+                ("cls / clear", "Clear console screen buffer"),
+                ("exit / quit", "Safely shutdown Atlas OS subsystem session"),
+            ]),
+        ]
+
+        for cat_name, color, cmds in categories:
+            t = Table(box=ROUNDED, border_style=color, show_header=True, header_style=f"bold {color}", expand=True)
+            t.add_column(f"Command ({cat_name})", style="bold white", width=34)
+            t.add_column("Description", style="dim white")
+            for cmd_name, desc in cmds:
+                t.add_row(f"[{color}]{cmd_name}[/{color}]", desc)
+            c.print(t)
+
+        return buf.getvalue().rstrip()
+
+    def format_sys_probe(self):
+        buf = io.StringIO()
+        c = Console(file=buf, force_terminal=True, width=95)
+        storage_info = self.storage.get_disk_info()
+        gpu_status = self.gpu.probe_compute()
+        gpu_devices = gpu_status["devices"]
+        t = Table(title="⚡ ATLAS OS SUBSYSTEM PROFILE ⚡", box=ROUNDED, border_style="cyan", expand=True)
+        t.add_column("Subsystem Component", style="bold cyan", width=26)
+        t.add_column("Configuration & Status", style="white")
+
+        t.add_row("Operating System", "Atlas OS Subsystem [v2.0.0-PRO]")
+        t.add_row("Kernel Core", "[green]C Microkernel[/green] (Round-Robin Preemptive Scheduler, VFS, IPC)")
+        t.add_row("Hardware Safety Guard", "[green]Rust Guard[/green] (Memory Page Protection & Fault Supervisor)")
+        t.add_row("Inbuilt Text Editor", "[bold yellow]Operator Code Editor[/bold yellow] [Active, syntax highlighting]")
+        t.add_row("Dedicated Storage Device", f"[bold white]{storage_info['device']}[/bold white] ({storage_info['capacity_gb']} GB Virtual Block Device)")
+        t.add_row("Storage Filesystem", f"{storage_info['filesystem']} [{storage_info['status']}]")
+        t.add_row("Network Subsystem", "VirtIO-Net + OP-Eth0 (Full TCP/IP Stack Active)")
+        t.add_row("Application Runtime", "Java OVM Sandbox, Python Polyglot Interpreter, C++ WM Compositor")
+        t.add_row("Host Script Bridges", "Direct Bridges for .sh, .bash, .ps1, .bat, .cmd, .opsh")
+        t.add_row("Active User & Shell", f"{self.variables.get('SYS.USER', 'operator')} (Role: root/admin) | AtlasSH")
+        if gpu_devices:
+            gpu_summary = "; ".join(
+                f"{device['name']} ({'driver active' if device.get('driver_loaded') else 'driver unavailable'})"
+                for device in gpu_devices
+            )
+        else:
+            gpu_summary = "No graphics device detected"
+        t.add_row("Host Graphics Device", gpu_summary)
+        try:
+            memory = self.mem_mgr.get_host_memory_summary()
+            total_gb = memory["total_bytes"] / (1024 ** 3)
+            available_gb = memory["available_bytes"] / (1024 ** 3)
+            t.add_row("Host Physical RAM", f"{total_gb:.2f} GB total, {available_gb:.2f} GB available")
+        except OSError as exc:
+            t.add_row("Host Physical RAM", f"Telemetry unavailable: {exc}")
+        c.print(t)
+        return buf.getvalue().rstrip()
+
+    def format_storage_inspect(self):
+        buf = io.StringIO()
+        c = Console(file=buf, force_terminal=True, width=95)
+        info = self.storage.get_disk_info()
+        used_mb = round(info['used_bytes'] / (1024 * 1024), 2)
+        free_mb = round(info['free_bytes'] / (1024 * 1024), 2)
+        pct = round((info['used_bytes'] / info['capacity_bytes']) * 100, 1)
+
+        t = Table(title="💾 INBUILT 2GB BLOCK STORAGE DIAGNOSTICS 💾", box=ROUNDED, border_style="yellow", expand=True)
+        t.add_column("Metric", style="bold yellow", width=25)
+        t.add_column("Value", style="white")
+
+        t.add_row("Device Node", str(info['device']))
+        t.add_row("Total Capacity", f"{info['capacity_bytes']:,} Bytes ({info['capacity_gb']} GB)")
+        t.add_row("Used Overhead", f"{info['used_bytes']:,} Bytes ({used_mb} MB) [{pct}%]")
+        t.add_row("Available Space", f"{info['free_bytes']:,} Bytes ({free_mb} MB)")
+        t.add_row("Filesystem Type", str(info['filesystem']))
+        t.add_row("Sector / Block Size", f"{info['sector_size']} Bytes / {info['block_size']} Bytes")
+        t.add_row("Mount Status", f"[green]{info['status']}[/green]")
+        t.add_row("Backing Virtual Image", str(self.storage.img_path.name))
+
+        bar_len = 40
+        filled = int(bar_len * (pct / 100))
+        bar = "█" * filled + "░" * (bar_len - filled)
+        t.add_row("Storage Allocation Bar", f"[green]{bar}[/green] {pct}%")
+
+        c.print(t)
+        return buf.getvalue().rstrip()
+
+    def format_ifconfig(self):
+        buf = io.StringIO()
+        c = Console(file=buf, force_terminal=True, width=95)
+        ifaces = self.network.ifconfig()
+        t = Table(title="🌐 NETWORK ADAPTER INTERFACES 🌐", box=ROUNDED, border_style="magenta", expand=True)
+        t.add_column("Interface", style="bold magenta", width=14)
+        t.add_column("State", style="bold green", width=10)
+        t.add_column("IP Address", style="white", width=18)
+        t.add_column("Netmask", style="dim white", width=18)
+        t.add_column("MAC Address", style="cyan")
+
+        for iface in ifaces:
+            st = "[green]ONLINE[/green]" if iface['state'].upper() == "UP" else "[red]DOWN[/red]"
+            t.add_row(iface['name'], st, iface['ip'], iface['mask'], iface['mac'])
+        c.print(t)
+        return buf.getvalue().rstrip()
+
+    def format_proc_top(self):
+        buf = io.StringIO()
+        c = Console(file=buf, force_terminal=True, width=95)
+        procs = self.proc_mgr.get_top()
+        t = Table(title="⚙️ ACTIVE SUBSYSTEM PROCESS TABLE ⚙️", box=ROUNDED, border_style="cyan", expand=True)
+        t.add_column("PID", style="bold cyan", width=7)
+        t.add_column("User", style="yellow", width=12)
+        t.add_column("State", style="bold green", width=10)
+        t.add_column("Priority", style="dim white", width=9)
+        t.add_column("CPU Time", style="white", width=12)
+        t.add_column("Uptime", style="dim white", width=10)
+        t.add_column("Command", style="bold white")
+
+        for p in procs:
+            t.add_row(str(p['pid']), p['user'], p['state'], str(p['priority']), p['cpu_time'], p['uptime'], p['cmd'])
+        c.print(t)
+        return buf.getvalue().rstrip()
+
+    def format_pkg_list(self):
+        buf = io.StringIO()
+        c = Console(file=buf, force_terminal=True, width=95)
+        pkgs = self.pkg_mgr.list_installed()
+        t = Table(title="📦 INSTALLED ATLAS OS PACKAGES 📦", box=ROUNDED, border_style="blue", expand=True)
+        t.add_column("Package ID", style="bold blue", width=16)
+        t.add_column("Name", style="white", width=26)
+        t.add_column("Version", style="bold yellow", width=10)
+        t.add_column("Runtime", style="cyan", width=10)
+        t.add_column("Status", style="bold green", width=10)
+        t.add_column("Description", style="dim white")
+
+        for p in pkgs:
+            st = "[green]ACTIVE[/green]" if p.get('status', 'active') == 'active' else "[red]OFFLINE[/red]"
+            t.add_row(p['id'], p['name'], p['version'], p['runtime'], st, p.get('desc', ''))
+        c.print(t)
+        return buf.getvalue().rstrip()
+
+    def format_df(self):
+        buf = io.StringIO()
+        c = Console(file=buf, force_terminal=True, width=95)
+        storage_info = self.storage.get_disk_info()
+        total_k = storage_info['capacity_bytes'] // 1024
+        used_k = storage_info['used_bytes'] // 1024
+        free_k = storage_info['free_bytes'] // 1024
+        pct = round((storage_info['used_bytes'] / storage_info['capacity_bytes']) * 100, 1)
+
+        t = Table(title="💽 FILESYSTEM DISK USAGE (df) 💽", box=ROUNDED, border_style="cyan", expand=True)
+        t.add_column("Filesystem", style="bold cyan", width=26)
+        t.add_column("1K-Blocks", style="white", width=14)
+        t.add_column("Used", style="yellow", width=12)
+        t.add_column("Available", style="green", width=14)
+        t.add_column("Use%", style="bold yellow", width=8)
+        t.add_column("Mounted on", style="bold white")
+
+        t.add_row("/dev/nvme0n1_operator", f"{total_k:,}", f"{used_k:,}", f"{free_k:,}", f"{pct}%", "/")
+        t.add_row("opfs_vfs", "1,048,576", "32,768", "1,015,808", "3.1%", "/mnt/vfs")
+        t.add_row("host_bridge", "33,554,432", "8,388,608", "25,165,824", "25.0%", "/mnt/host")
+        c.print(t)
+        return buf.getvalue().rstrip()
+
+    def format_free(self):
+        buf = io.StringIO()
+        c = Console(file=buf, force_terminal=True, width=95)
+        try:
+            memory = self.mem_mgr.get_host_memory_summary()
+        except OSError as exc:
+            return f"\033[31m[RAM ERROR] Unable to read host memory details: {exc}\033[0m"
+
+        to_kb = lambda value: "N/A" if value is None else f"{value // 1024:,}"
+        t = Table(title="🧠 MEMORY & SWAP TELEMETRY (free) 🧠", box=ROUNDED, border_style="green", expand=True)
+        t.add_column("Type", style="bold green", width=10)
+        t.add_column("Total (KB)", style="white", width=14)
+        t.add_column("Used (KB)", style="yellow", width=14)
+        t.add_column("Free (KB)", style="green", width=14)
+        t.add_column("Shared (KB)", style="dim white", width=14)
+        t.add_column("Available (KB)", style="bold cyan")
+
+        t.add_row(
+            "Mem",
+            to_kb(memory["total_bytes"]),
+            to_kb(memory["used_bytes"]),
+            to_kb(memory["free_bytes"]),
+            "-",
+            to_kb(memory["available_bytes"]),
+        )
+        t.add_row(
+            "Swap",
+            to_kb(memory["swap_total_bytes"]),
+            to_kb(memory["swap_used_bytes"]),
+            to_kb(memory["swap_free_bytes"]),
+            "-",
+            to_kb(memory["swap_free_bytes"]),
+        )
+        c.print(t)
+        output = buf.getvalue().rstrip()
+        if memory.get("swap_error"):
+            output += f"\n\033[33m[SWAP WARNING] {memory['swap_error']}\033[0m"
+        return output
+
+    def format_user_list(self):
+        buf = io.StringIO()
+        c = Console(file=buf, force_terminal=True, width=95)
+        users = self.user_mgr.list_users()
+        t = Table(title="👥 ATLAS OS USER REGISTRY & MEMORY ALLOCATION 👥", box=ROUNDED, border_style="cyan", expand=True)
+        t.add_column("UID", style="bold cyan", width=6)
+        t.add_column("Username", style="bold white", width=14)
+        t.add_column("Role", style="yellow", width=8)
+        t.add_column("Home Directory", style="dim white", width=24)
+        t.add_column("Dedicated RAM", style="bold green", width=15)
+        t.add_column("Used RAM", style="white", width=10)
+        t.add_column("Disk Quota", style="cyan", width=12)
+        t.add_column("Session", style="bold magenta")
+
+        for u in users:
+            session_badge = "[bold green]● ACTIVE[/bold green]" if u["is_active"] else "[dim]idle[/dim]"
+            t.add_row(
+                str(u["uid"]),
+                u["username"],
+                u["role"],
+                u["home_dir"],
+                f"{u['memory_mb']:,} MB",
+                f"{u['used_mb']} MB",
+                f"{u['quota_mb']} MB",
+                session_badge
+            )
+        c.print(t)
+        return buf.getvalue().rstrip()
+
+    def format_user_memory(self, username: Optional[str] = None):
+        target_u = username or self.variables.get("SYS.USER", "operator")
+        mem = self.mem_mgr.get_user_memory(target_u)
+        buf = io.StringIO()
+        c = Console(file=buf, force_terminal=True, width=95)
+        t = Table(title=f"🧠 VIRTUAL MEMORY TELEMETRY: {target_u.upper()} 🧠", box=ROUNDED, border_style="green", expand=True)
+        t.add_column("Metric", style="bold green", width=26)
+        t.add_column("Value", style="white")
+
+        t.add_row("User Identifier", target_u)
+        t.add_row("Dedicated Memory Pool", f"{mem['allocated_mb']:,} MB ({mem['allocated_mb'] * 1024:,} KB)")
+        t.add_row("Active Resident Usage", f"{mem['used_mb']:,} MB ({mem['usage_pct']}%)")
+        t.add_row("Available Headroom", f"{mem['free_mb']:,} MB")
+        t.add_row("Allocated Virtual Pages", f"{mem['virtual_pages']:,} pages (Page size: {mem['page_size_kb']} KB)")
+        t.add_row("Memory Controller Status", f"[green]{mem['status']}[/green]")
+
+        bar_len = 40
+        filled = int(bar_len * (mem['usage_pct'] / 100))
+        bar = "█" * filled + "░" * (bar_len - filled)
+        t.add_row("User Memory Gauge", f"[green]{bar}[/green] {mem['usage_pct']}%")
+
+        c.print(t)
+        return buf.getvalue().rstrip()
+
+    def format_gpu_probe(self):
+        buf = io.StringIO()
+        c = Console(file=buf, force_terminal=True, width=95)
+        status = self.gpu.probe_compute()
+        devices = status.get("devices", [])
+        if not devices:
+            details = "\n".join(status.get("errors", []))
+            message = "\033[33m[GPU PROBE]\033[0m No graphics device was detected."
+            return f"{message}\n{details}" if details else message
+
+        for idx, d in enumerate(devices, 1):
+            t = Table(
+                title=f"🎮 HARDWARE GPU INTROSPECTION (GPU #{idx}) 🎮",
+                box=ROUNDED,
+                border_style="bright_magenta",
+                expand=True
+            )
+            t.add_column("Specification Property", style="bold cyan", width=28)
+            t.add_column("Hardware Telemetry Value", style="white")
+
+            t.add_row("GPU Model Name", f"[bold white]{d.get('name', 'Unknown')}[/bold white]")
+            t.add_row("GPU Hardware Vendor", f"[bold yellow]{d.get('vendor', 'Unknown')}[/bold yellow]")
+            t.add_row("Graphics Processor (Chip)", str(d.get("chip", "Unknown")))
+
+            # Memory specs
+            ded_ram = d.get("memory_dedicated_mb", 0)
+            avail_ram = d.get("memory_available_mb", 0)
+            if isinstance(ded_ram, (int, float)) and ded_ram > 0:
+                ded_str = f"{ded_ram:,} MB ({round(ded_ram / 1024, 2)} GB)"
+            else:
+                ded_str = str(ded_ram)
+            if isinstance(avail_ram, (int, float)) and avail_ram > 0:
+                avail_str = f"{avail_ram:,} MB ({round(avail_ram / 1024, 2)} GB)"
+            else:
+                avail_str = str(avail_ram)
+
+            t.add_row("Dedicated Video RAM (VRAM)", ded_str)
+            t.add_row("Reported GPU Memory", avail_str)
+            t.add_row("GPU Memory In Use", str(d.get("memory_used_mb", "Unknown")))
+            t.add_row("GPU Memory Available", str(d.get("memory_free_mb", "Unknown")))
+            t.add_row("GPU Utilization", str(d.get("utilization_pct", "Unknown")))
+            t.add_row("Display Driver Version", str(d.get("driver", "Unknown")))
+            driver_style = "green" if d.get("driver_loaded") else "red"
+            t.add_row("Host GPU Driver Health", f"[{driver_style}]{d.get('driver_status', 'Unknown')}[/{driver_style}]")
+            t.add_row("Current Video Resolution", str(d.get("display_mode", "Unknown")))
+            t.add_row("Active Refresh Rate", f"[bold green]{d.get('refresh_rate', 'Unknown')}[/bold green]")
+            t.add_row("Hardware Compute Units", str(d.get("compute_units", "N/A")))
+            t.add_row("Engine Peak Clock Speed", str(d.get("clock", "N/A")))
+            t.add_row("PCI Hardware Device ID", str(d.get("device_id", "N/A")))
+            t.add_row("Driver & Hardware Status", f"[bold green]{d.get('status', 'OK')}[/bold green]")
+            t.add_row("Compute Subsystem Bridge", f"[cyan]{d.get('backend', 'DirectX')}[/cyan]")
+
+            c.print(t)
+
+        return buf.getvalue().rstrip()
+
+    def _set_passd_password_interactively(self, username):
+        import getpass
+
+        if not sys.stdin.isatty():
+            return "passd password setup requires an interactive terminal."
+        for _ in range(3):
+            password = getpass.getpass("[passd] Set a new passd password (8+ characters): ")
+            confirmation = getpass.getpass("[passd] Confirm new passd password: ")
+            if password != confirmation:
+                print("passd passwords did not match; try again.")
+                continue
+            try:
+                self.user_mgr.set_passd_password(username, password)
+            except ValueError as exc:
+                print(str(exc))
+                continue
+            return None
+        return "passd password setup cancelled after three unsuccessful attempts."
+
+    def _authenticate_passd(self, username):
+        import getpass
+
+        if not sys.stdin.isatty():
+            return False
+        for attempt in range(3):
+            password = getpass.getpass(f"[passd] password for {username}: ")
+            if self.user_mgr.verify_passd_password(username, password):
+                self._passd_auth_cache = {
+                    "user": username,
+                    "timestamp": time.time(),
+                }
+                return True
+            if attempt < 2:
+                print("Incorrect passd password.")
+        return False
 
     def eval_command(self, raw_line: str):
         line = raw_line.strip()
@@ -168,108 +832,276 @@ class OperatorShellEngine:
         cmd = tokens[0].lower()
         args = tokens[1:]
 
+        # Sudo alias enforcement: In Atlas OS, use 'passd' instead of 'sudo'
+        if cmd == "sudo":
+            return (
+                "\033[1;33m[Atlas OS Security]: 'sudo' is not used in Atlas OS.\033[0m\n"
+                "In Atlas OS, use \033[1;32mpassd <command>\033[0m for privileged execution.\n"
+                "Example: \033[1;36mpassd user.create <user> <pass>\033[0m or \033[1;36mpassd sec.firewall\033[0m"
+            )
+
+        # passd (Privileged Execution Layer - replaces sudo in Atlas OS)
+        if cmd in ("passd", "passd.setup"):
+            setup_only = cmd == "passd.setup"
+            if setup_only and args:
+                return "Usage: passd.setup"
+            if not setup_only and args and args[0].lower() == "setup":
+                setup_only = True
+                args = args[1:]
+                if args:
+                    return "Usage: passd setup"
+
+            if not args and not setup_only:
+                return (
+                    "\033[1;36mUsage: passd [-u <user>] <command> [args...]\033[0m\n"
+                    "Execute a command with elevated superuser (root) privileges in Atlas OS.\n"
+                    "Run passd.setup to create or change your separate passd password.\n"
+                    "Examples:\n"
+                    "  passd user.create dev secret123\n"
+                    "  passd user.delete olduser\n"
+                    "  passd sec.firewall\n"
+                    "  passd srv.start redis\n"
+                    "  passd -u operator whoami"
+                )
+
+            target_user = "root"
+            sub_args = list(args)
+            if not setup_only and len(sub_args) >= 3 and sub_args[0] == "-u":
+                target_user = sub_args[1]
+                sub_args = sub_args[2:]
+
+            cur_user = self.variables.get("SYS.USER", "operator")
+            if setup_only:
+                if self.user_mgr.has_passd_password(cur_user):
+                    now = time.time()
+                    cached_ok = (
+                        self._passd_auth_cache.get("user") == cur_user
+                        and now - self._passd_auth_cache.get("timestamp", 0) < 300
+                    )
+                    if not cached_ok and not self._authenticate_passd(cur_user):
+                        return (
+                            "\033[31m[PASSD AUTH ERROR]\033[0m "
+                            "Password setup requires the current passd password."
+                        )
+                setup_error = self._set_passd_password_interactively(cur_user)
+                if setup_error:
+                    return f"\033[31m[PASSD SETUP ERROR]\033[0m {setup_error}"
+                self._passd_auth_cache = {"user": cur_user, "timestamp": time.time()}
+                return f"passd password set for '{cur_user}'."
+
+            now = time.time()
+            cached_ok = (
+                self._passd_auth_cache.get("user") == cur_user
+                and now - self._passd_auth_cache.get("timestamp", 0) < 300
+            )
+
+            if cur_user != "root":
+                if not self.user_mgr.has_passd_password(cur_user):
+                    setup_error = self._set_passd_password_interactively(cur_user)
+                    if setup_error:
+                        return (
+                            "\033[31m[PASSD SETUP REQUIRED]\033[0m "
+                            f"{setup_error} Run passd.setup from an interactive shell."
+                        )
+                    self._passd_auth_cache = {"user": cur_user, "timestamp": time.time()}
+                    print("passd password created. Continuing with the requested privileged command.")
+                elif not cached_ok and not self._authenticate_passd(cur_user):
+                    return (
+                        "\033[31m[PASSD AUTH ERROR]\033[0m "
+                        "Three incorrect passd passwords; command was not run."
+                    )
+
+            sub_cmd_line = " ".join(shlex.quote(a) for a in sub_args)
+            orig_user = self.variables.get("SYS.USER", "operator")
+            self.variables["SYS.USER"] = target_user
+            self.variables["SYS.PASSD_ACTIVE"] = "true"
+            try:
+                return self.eval_command(sub_cmd_line)
+            finally:
+                self.variables["SYS.USER"] = orig_user
+                self.variables.pop("SYS.PASSD_ACTIVE", None)
+
+        # Familiar POSIX aliases
+        if cmd == "ll":
+            cmd, args = "ls", ["-l", *args]
+        elif cmd == "la":
+            cmd, args = "ls", ["-a", *args]
+
         if cmd in ("gui", "browser", "web"):
             return "[SUBSYSTEM] GUI and browser components have been removed from Operator OS."
 
+        if cmd in ("pow", "pow.exec"):
+            if not args:
+                return "Usage: pow <workflow.pow>"
+            try:
+                return self.pow.execute_file(args[0])
+            except Exception as exc:
+                return f"\033[31m[POW ERROR] {exc}\033[0m"
+
+        if cmd == "powcurl":
+            if len(args) != 1:
+                return "Usage: powcurl <script.powcurl>"
+            if not args[0].lower().endswith(".powcurl"):
+                return "\033[31m[POWCURL ERROR]\033[0m Scripts must use the .powcurl extension."
+
+            current_user = self.variables.get("SYS.USER", "operator")
+            cwd = self.variables.get("SYS.CWD", f"/Users/{current_user}/home")
+            script_path, _ = self.storage.resolve_vpath(args[0], cwd, current_user)
+            executable = ROOT_DIR / "bin" / "powcurl.exe"
+            if not executable.is_file():
+                return (
+                    "\033[31m[POWCURL ERROR]\033[0m Runtime not built. "
+                    "Build it with .\\build.ps1 -Release."
+                )
+            if not script_path.is_file():
+                return f"\033[31m[POWCURL ERROR]\033[0m Script not found: {args[0]}"
+            try:
+                result = subprocess.run(
+                    [str(executable), str(script_path)],
+                    cwd=str(script_path.parent),
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                )
+            except OSError as exc:
+                return f"\033[31m[POWCURL ERROR]\033[0m Could not launch runtime: {exc}"
+            output = "\n".join(part.strip() for part in (result.stdout, result.stderr) if part.strip())
+            if result.returncode:
+                return f"\033[31m[POWCURL ERROR]\033[0m {output or f'Runtime exited with code {result.returncode}'}"
+            return output or None
+
+        if cmd == "gpu.probe":
+            return self.format_gpu_probe()
+
+        if cmd == "gpu.compute":
+            result = self.gpu.probe_compute()
+            return f"GPU driver: {'active' if result['live'] else 'unavailable'} ({result['backend']})"
+
+        if cmd == "gpu.active":
+            return "true" if self.gpu.probe_compute()["live"] else "false"
+
+        if cmd == "gpu.ai":
+            return f"AI acceleration backend: {self.gpu.select_backend()}"
+
         # Check script invocation shorthand (e.g. ./demo.sh or demo.bat)
-        if cmd.startswith("./") or cmd.endswith((".sh", ".bash", ".ps1", ".bat", ".cmd", ".opsh")):
+        if cmd.startswith("./") or cmd.endswith((".pow", ".sh", ".bash", ".ps1", ".bat", ".cmd", ".java", ".c", ".opsh")):
             script = cmd.lstrip("./")
             return self.execute_script_file(script, args)
 
+        # Inbuilt code editor
+        if cmd in ("nano", "edit", "pico"):
+            cur_u = self.variables.get("SYS.USER", "operator")
+            target_f = args[0] if args else None
+
+            if target_f:
+                phys_path, _ = self.storage.resolve_vpath(target_f, self.variables["SYS.CWD"], cur_u)
+                phys_cwd = str(phys_path.parent)
+                target_str = str(phys_path)
+            else:
+                phys_cwd_path, _ = self.storage.resolve_vpath(self.variables["SYS.CWD"], "/", cur_u)
+                phys_cwd = str(phys_cwd_path)
+                target_str = None
+
+            try:
+                editor = OperatorCodeEditor(target_str, working_dir=phys_cwd)
+                editor.run()
+                return None
+            except Exception as e:
+                return f"\033[31m[Nano Editor Exception]: {e}\033[0m"
+
         # Distinct Custom Operator Command Vocabulary
         if cmd == "help":
-            return """
-\033[1;36mOPERATOR OS COMMAND VOCABULARY (v2.0 PRO)\033[0m
-  System & Hardware:
-    sys.probe              Probe OS Kernel, microarchitecture, scheduler & memory
-    storage.inspect        Inspect inbuilt 2GB Block Storage partition and allocation
-    proc.list              Enumerate running subsystem processes
-
-  Network Stack:
-    net.ifconfig           Display network interfaces (lo0, op_eth0, virtio_net)
-    net.routes             Display kernel routing table
-    net.resolve <host>     DNS query resolver (e.g. net.resolve google.com)
-    net.probe <host> [port] Measure TCP latency & probe connectivity
-    net.fetch <url>        Network socket HTTP client request
-
-  Linux Commands:
-    ls [-la] [path]        List directory contents (Linux style)
-    pwd                    Print working directory (Linux / POSIX)
-    cat <file>             Concatenate & display file content
-    touch <file>           Create empty file or update timestamp
-    grep <pattern> <file>  Search text matching regex or string in files
-    df [-h]                Report filesystem disk space usage
-    free [-m|-h]           Display memory & swap telemetry
-    uname [-a]             Print kernel and system architecture information
-    uptime                 Show system boot uptime and load
-    wc [-l|-w|-c] <file>   Print newline, word, and byte counts
-
-  PowerShell Commands:
-    Get-Process [name]     List active processes or filter by name (alias: ps)
-    Get-Service            Enumerate subsystem and host services
-    Get-Date               Get current local date and timestamp
-    Get-ChildItem [path]   List directory objects (alias: gci, dir)
-    Get-Content <file>     Read content of file (alias: gc)
-    Test-Connection <host> Ping network host connectivity
-    Get-ComputerInfo       Display subsystem host hardware info
-
-  CMD / Windows Commands:
-    dir [path]             List files and directories in Windows format
-    type <file>            Display file contents
-    ver                    Display Operator OS kernel and build version
-    systeminfo             Show complete system and memory diagnostics
-    ipconfig               Display IP configuration and adapters
-    tree [dir]             Graphically display directory structure
-
-  Script File Execution Engine:
-    script.run <file>      Run Linux (.sh), PowerShell (.ps1), Batch (.bat), or Operator (.opsh) files
-                           Shorthand: Simply type './myscript.sh' or 'build.bat'
-
-  Package & System DB:
-    pkg.list               Query installed packages from SQL registry
-    db.query <sql>         Run raw SQL statement on system database
-
-  Variables & Navigation:
-    var.set <k>=<v>        Assign system environment variable
-    var.get <k>            Read environment variable
-    cd <dir> / fs.goto     Change directory
-    cls / clear            Clear screen buffer
-    exit                   Exit shell
-"""
+            return self.format_help()
 
         elif cmd == "sys.probe":
-            storage_info = self.storage.get_disk_info()
-            return f"""
-\033[1;36m=== OPERATOR OS SUBSYSTEM PROFILE ===\033[0m
-Kernel Core:       C Microkernel (Round-Robin Preemptive Scheduler, VFS, IPC)
-Safety Driver:     Rust Guard (Page Protection Supervisor)
-Storage Device:    {storage_info['device']} ({storage_info['capacity_gb']} GB Inbuilt Virtual Disk)
-Filesystem:        {storage_info['filesystem']} [{storage_info['status']}]
-Network Adapters:  VirtIO-Net + OP-Eth0 (Full TCP/IP Stack Active)
-Runtime Engines:   Java OVM Sandbox, Python Polyglot Interpreter, C++ WM Compositor
-Host Integration:  Direct Shell Script Bridges (.sh, .bash, .ps1, .bat, .cmd)
-"""
+            return self.format_sys_probe()
 
         elif cmd == "storage.inspect":
-            info = self.storage.get_disk_info()
-            return f"""
-\033[1;36m=== INBUILT 2GB STORAGE DEVICE DIAGNOSTICS ===\033[0m
-Device Node:       {info['device']}
-Total Capacity:    {info['capacity_bytes']:,} Bytes ({info['capacity_gb']} GB)
-Reserved Overhead: {info['used_bytes']:,} Bytes ({round(info['used_bytes'] / (1024*1024), 2)} MB)
-Free Space:        {info['free_bytes']:,} Bytes ({round(info['free_bytes'] / (1024*1024), 2)} MB)
-Filesystem Type:   {info['filesystem']}
-Sector Size:       {info['sector_size']} Bytes | Block Size: {info['block_size']} Bytes
-Mount Flags:       {info['status']}
-Image Backing:     {self.storage.img_path.name}
-"""
+            return self.format_storage_inspect()
+
+        elif cmd == "ssh":
+            if not args:
+                return "Usage: ssh <user@host> [OpenSSH options] [remote-command]"
+            ssh_executable = shutil.which("ssh")
+            if not ssh_executable:
+                return "[SSH ERROR] OpenSSH client was not found on the host."
+            try:
+                result = subprocess.run([ssh_executable, *args], check=False)
+            except OSError as exc:
+                return f"[SSH ERROR] Could not start OpenSSH client: {exc}"
+            if result.returncode:
+                return f"[SSH exited with code {result.returncode}]"
+            return None
+
+        elif cmd == "ssh.server":
+            if not args:
+                return "Usage: ssh.server start [--host <IPv4>] [--port <port>] | status | stop"
+            action = args[0].lower()
+            if action == "status" and len(args) == 1:
+                return self.ssh_service.status()
+            if action == "stop" and len(args) == 1:
+                return self.ssh_service.stop()
+            if action != "start":
+                return "Usage: ssh.server start [--host <IPv4>] [--port <port>] | status | stop"
+            host = "127.0.0.1"
+            port = 2222
+            index = 1
+            try:
+                while index < len(args):
+                    option = args[index]
+                    if option == "--host" and index + 1 < len(args):
+                        host = args[index + 1]
+                        index += 2
+                    elif option == "--port" and index + 1 < len(args):
+                        port = int(args[index + 1])
+                        index += 2
+                    else:
+                        raise ValueError(f"Unknown or incomplete option: {option}")
+                return self.ssh_service.start(host=host, port=port)
+            except (OSError, ValueError) as exc:
+                return f"[SSH SERVER ERROR] {exc}"
+
+        elif cmd in ("ssh.key.add", "ssh.key.list", "ssh.key.remove"):
+            current_user = self.variables.get("SYS.USER", "operator")
+            target_user = args[0].lower() if args else current_user
+            if target_user != current_user and current_user != "root":
+                return "[PERMISSION DENIED] Only passd/root may manage another user's SSH keys."
+            if cmd == "ssh.key.list":
+                if len(args) > 1:
+                    return "Usage: ssh.key.list [user]"
+                try:
+                    fingerprints = self.ssh_service.list_authorized_keys(target_user)
+                except (OSError, ValueError) as exc:
+                    return f"[SSH KEY ERROR] {exc}"
+                return "\n".join(fingerprints) if fingerprints else f"No SSH keys enrolled for '{target_user}'."
+            if cmd == "ssh.key.add":
+                if len(args) != 2:
+                    return "Usage: ssh.key.add <user> <public-key-file>"
+                cwd = self.variables.get("SYS.CWD", f"/Users/{current_user}/home")
+                try:
+                    host_key_path = Path(args[1]).expanduser()
+                    if host_key_path.is_absolute() and host_key_path.is_file():
+                        key_path = host_key_path
+                    else:
+                        key_path, _ = self.storage.resolve_vpath(args[1], cwd, current_user)
+                    if key_path.stat().st_size > 16 * 1024:
+                        raise ValueError("Public-key file must be no larger than 16 KiB")
+                    public_key = key_path.read_text(encoding="utf-8")
+                    fingerprint = self.ssh_service.add_authorized_key(target_user, public_key)
+                    return f"Authorized Ed25519 key for '{target_user}'. Fingerprint: {fingerprint}"
+                except (OSError, ValueError) as exc:
+                    return f"[SSH KEY ERROR] {exc}"
+            if len(args) != 2:
+                return "Usage: ssh.key.remove <user> <fingerprint>"
+            try:
+                removed = self.ssh_service.remove_authorized_key(target_user, args[1])
+            except (OSError, ValueError) as exc:
+                return f"[SSH KEY ERROR] {exc}"
+            return "SSH public key revoked." if removed else "No matching SSH key fingerprint found."
 
         elif cmd == "net.ifconfig":
-            ifaces = self.network.ifconfig()
-            res = ["\033[1;36mInterface   State    IP Address        Netmask          MAC Address\033[0m", "-"*70]
-            for iface in ifaces:
-                res.append(f"{iface['name']:<11} {iface['state']:<8} {iface['ip']:<17} {iface['mask']:<16} {iface['mac']}")
-            return "\n".join(res)
+            return self.format_ifconfig()
 
         elif cmd == "net.routes":
             routes = self.network.route_table()
@@ -307,15 +1139,94 @@ Image Backing:     {self.storage.img_path.name}
         elif cmd == "script.run":
             if not args:
                 return "Usage: script.run <path-to-script-file> [args...]"
-            return self.execute_script_file(args[0], args[1:])
+            if not args[0].lower().endswith(".pow"):
+                return "[Script Error]: Operator scripts must use the .pow format."
+            return self.pow.execute_file(args[0])
+
+        elif cmd in ("drive.mount", "drive.connect"):
+            if args:
+                return "Usage: drive.mount"
+            cur_u = self.variables.get("SYS.USER", "operator")
+            try:
+                return self.google_drive.mount_interactively(username=cur_u)
+            except Exception as exc:
+                return f"\033[31m[DRIVE ERROR]\033[0m {exc}"
 
         elif cmd == "drive.status":
-            status = self.google_drive.status()
-            return (f"Google Drive: {'CONNECTED' if status['authenticated'] else 'NOT CONNECTED'}\n"
-                    f"Mount: {status['mount']}\nFolders: {', '.join(status['folders'])}")
+            if args:
+                return "Usage: drive.status"
+            cur_u = self.variables.get("SYS.USER", "operator")
+            status = self.google_drive.status(cur_u)
+            state = "MOUNTED" if status["authenticated"] else "NOT MOUNTED"
+            write_state = "unlocked" if status["write_unlocked"] else "locked"
+            details = "\n".join(f"Sync: {message}" for message in status["sync_messages"])
+            return (
+                f"Google Drive: {state}\nMount: {status['mount']}\n"
+                f"Automatic uploads: {write_state}"
+                + (f"\n{details}" if details else "")
+            )
 
-        elif cmd == "drive.connect":
-            return self.google_drive.connect_interactively()
+        elif cmd == "drive.ls":
+            if len(args) > 1:
+                return "Usage: drive.ls [folder-id]"
+            folder_id = args[0] if args else "root"
+            cur_u = self.variables.get("SYS.USER", "operator")
+            try:
+                entries = self.google_drive.list_files(folder_id, username=cur_u)
+            except Exception as exc:
+                return f"\033[31m[DRIVE ERROR]\033[0m {exc}"
+            if not entries:
+                return "(empty Google Drive folder)"
+            rows = ["ID                                     TYPE       SIZE       NAME", "-" * 76]
+            for entry in entries:
+                kind = "DIR" if entry.get("mimeType") == "application/vnd.google-apps.folder" else "FILE"
+                size = entry.get("size", "-")
+                rows.append(f"{entry['id']:<38} {kind:<10} {size:>10}  {entry['name']}")
+            return "\n".join(rows)
+
+        elif cmd == "drive.download":
+            if len(args) != 1:
+                return "Usage: drive.download <file-id>"
+            cur_u = self.variables.get("SYS.USER", "operator")
+            try:
+                target = self.google_drive.download_file(args[0], username=cur_u)
+                _, virtual_mount = self.storage.resolve_vpath(
+                    f"/Users/{cur_u}/Google Drive",
+                    "/",
+                    cur_u,
+                )
+                return f"Downloaded to {virtual_mount}/{Path(target).name}"
+            except Exception as exc:
+                return f"\033[31m[DRIVE ERROR]\033[0m {exc}"
+
+        elif cmd == "drive.upload":
+            if len(args) != 1:
+                return "Usage: drive.upload <file>"
+            cur_u = self.variables.get("SYS.USER", "operator")
+            cwd = self.variables.get("SYS.CWD", f"/Users/{cur_u}/home")
+            try:
+                local_path, _ = self.storage.resolve_vpath(args[0], cwd, cur_u)
+                return self.google_drive.upload_file(local_path, username=cur_u)
+            except Exception as exc:
+                return f"\033[31m[DRIVE ERROR]\033[0m {exc}"
+
+        elif cmd == "drive.write.setup":
+            if args:
+                return "Usage: drive.write.setup"
+            cur_u = self.variables.get("SYS.USER", "operator")
+            try:
+                return self.google_drive.setup_write_passphrase(cur_u)
+            except Exception as exc:
+                return f"\033[31m[DRIVE ERROR]\033[0m {exc}"
+
+        elif cmd == "drive.write.unlock":
+            if args:
+                return "Usage: drive.write.unlock"
+            cur_u = self.variables.get("SYS.USER", "operator")
+            try:
+                return self.google_drive.unlock_writes(cur_u)
+            except Exception as exc:
+                return f"\033[31m[DRIVE ERROR]\033[0m {exc}"
 
         # Process Manager Commands
         elif cmd == "proc.top":
@@ -345,7 +1256,104 @@ Image Backing:     {self.storage.img_path.name}
             ok = self.proc_mgr.signal_process(pid, "SIGKILL")
             return f"\033[1;31m[PROC KILLED]\033[0m Process PID={pid} terminated." if ok else f"PID {pid} not found."
 
-        # User & Security System
+        # ── Multi-User Management ───────────────────────────────────────────────
+        elif cmd in ("user.list", "users"):
+            return self.format_user_list()
+
+        elif cmd in ("user.create", "useradd"):
+            cur_u = self.variables.get("SYS.USER", "operator")
+            if cur_u != "root":
+                return f"\033[31m[PERMISSION DENIED]\033[0m Creating users requires superuser privileges.\nUse: \033[1;36mpassd {line}\033[0m"
+            if len(args) < 2:
+                return "Usage: user.create <username> <password> [memory_mb]"
+            uname, passwd = args[0], args[1]
+            mem_mb = int(args[2]) if len(args) > 2 else None
+            try:
+                ok, msg = self.user_mgr.create_user(uname, passwd, memory_mb=mem_mb)
+                if ok:
+                    ui = self.user_mgr.get_user(uname) or {}
+                    return (f"\033[1;32m[USER CREATED]\033[0m '{uname}' provisioned successfully.\n"
+                            f"  Home:   /Users/{uname}/home\n"
+                            f"  RAM:    {ui.get('memory_mb', '?')} MB dedicated\n"
+                            f"  Quota:  {ui.get('quota_mb', '?')} MB disk quota\n"
+                            f"  Status: Filesystem hierarchy initialized in 2GB storage.")
+                return f"\033[31m[USER ERROR]\033[0m {msg}"
+            except Exception as e:
+                return f"\033[31m[USER ERROR]\033[0m {e}"
+
+        elif cmd in ("user.delete", "userdel"):
+            cur_u = self.variables.get("SYS.USER", "operator")
+            if cur_u != "root":
+                return f"\033[31m[PERMISSION DENIED]\033[0m Deleting users requires superuser privileges.\nUse: \033[1;36mpassd {line}\033[0m"
+            if not args:
+                return "Usage: user.delete <username>"
+            uname = args[0]
+            if uname in ("root", "operator"):
+                return f"\033[31m[DENIED]\033[0m Cannot delete protected system user '{uname}'."
+            try:
+                ok, msg = self.user_mgr.delete_user(uname)
+                if ok:
+                    return (f"\033[1;33m[USER DELETED]\033[0m '{uname}' removed.\n"
+                            f"  Filesystem purged from 2GB storage.\n"
+                            f"  Memory pool reclaimed successfully.")
+                return f"\033[31m[USER ERROR]\033[0m {msg}"
+            except Exception as e:
+                return f"\033[31m[USER ERROR]\033[0m {e}"
+
+        elif cmd in ("user.login", "login"):
+            if len(args) < 2:
+                return "Usage: user.login <username> <password>"
+            uname, passwd = args[0], args[1]
+            try:
+                ok = self.user_mgr.authenticate(uname, passwd)
+                if ok:
+                    self.variables["SYS.USER"] = uname
+                    self.variables["SYS.CWD"] = f"/Users/{uname}/home"
+                    ui = self.user_mgr.get_user(uname)
+                    role = ui.get("role", "user") if ui else "user"
+                    return (f"\033[1;32m[LOGIN OK]\033[0m Session started as '{uname}' (Role: {role})\n"
+                            f"  Working directory set to: /Users/{uname}/home")
+                return "\033[31m[LOGIN FAILED]\033[0m Invalid username or password."
+            except Exception as e:
+                return f"\033[31m[LOGIN ERROR]\033[0m {e}"
+
+        elif cmd in ("user.switch", "su"):
+            if not args:
+                return "Usage: user.switch <username>  (then run 'user.login' if password required)"
+            uname = args[0]
+            if len(args) >= 2:
+                return self.eval_command(f"user.login {args[0]} {args[1]}")
+            try:
+                user_info = self.user_mgr.get_user(uname)
+                if user_info:
+                    self.variables["SYS.USER"] = uname
+                    self.variables["SYS.CWD"] = f"/Users/{uname}/home"
+                    return (f"\033[1;33m[SU]\033[0m Switched to user '{uname}'.\n"
+                            f"  CWD set to /Users/{uname}/home")
+                return f"\033[31m[SU FAILED]\033[0m User '{uname}' not found."
+            except Exception as e:
+                return f"\033[31m[SU ERROR]\033[0m {e}"
+
+        elif cmd in ("user.whoami", "whoami"):
+            cur_u = self.variables.get("SYS.USER", "operator")
+            cwd = self.variables.get("SYS.CWD", f"/Users/{cur_u}/home")
+            try:
+                user_info = self.user_mgr.get_user(cur_u)
+                role = user_info.get("role", "user") if user_info else "user"
+            except Exception:
+                role = "user"
+            return (f"\033[1;36mUser:\033[0m  {cur_u}\n"
+                    f"\033[1;36mRole:\033[0m  {role}\n"
+                    f"\033[1;36mCWD:\033[0m   {cwd}")
+
+        elif cmd in ("user.memory", "mem.user"):
+            target_u = args[0] if args else None
+            return self.format_user_memory(target_u)
+
+
+
+        # ── User & Security System (legacy auth.* aliases) ──────────────────────
+
         elif cmd == "auth.login":
             if len(args) < 2: return "Usage: auth.login <username> <password>"
             user, pwd = args[0], args[1]
@@ -430,7 +1438,11 @@ Image Backing:     {self.storage.img_path.name}
             return "\n".join(res)
 
         elif cmd == "app.launch":
-            if not args: return "Usage: app.launch <app-name-or-id> (e.g. app.launch Calculator)"
+            if not args: return "Usage: app.launch <app-name-or-id> (e.g. app.launch Calculator, app.launch Nano)"
+            target_app = args[0].lower()
+            if target_app in ("app.nano", "nano", "app.editor", "editor"):
+                target_f = args[1] if len(args) > 1 else None
+                return self.eval_command(f"nano {target_f}" if target_f else "nano")
             return self.app_mgr.launch(args[0])
 
         elif cmd == "app.close":
@@ -552,7 +1564,7 @@ Image Backing:     {self.storage.img_path.name}
             return f"\033[1;32m[BOOTABLE TARGET READY]\033[0m Image: {img.name}\nQEMU Runner: {cmd_str}"
 
         elif cmd == "pkg.list":
-            return self.query_db("SELECT id, name, version, runtime, status FROM sys_packages;")
+            return self.format_pkg_list()
 
         elif cmd == "db.query":
             if not args:
@@ -575,24 +1587,26 @@ Image Backing:     {self.storage.img_path.name}
             return str(self.variables.get(args[0], f"Undefined: {args[0]}"))
 
         elif cmd in ("fs.goto", "cd"):
-            target = args[0] if args else str(Path.home())
-            new_path = os.path.abspath(os.path.join(self.variables["SYS.CWD"], target))
-            if os.path.isdir(new_path):
-                self.variables["SYS.CWD"] = new_path
+            cur_u = self.variables.get("SYS.USER", "operator")
+            cwd = self.variables.get("SYS.CWD", f"/Users/{cur_u}/home")
+            target = args[0] if args else f"/Users/{cur_u}/home"
+            phys, norm = self.storage.resolve_vpath(target, cwd, cur_u)
+            if phys.is_dir():
+                self.variables["SYS.CWD"] = norm
                 return None
-            return f"Directory not found: {target}"
+            return f"\033[31mcd: {target}: No such directory in Atlas OS storage\033[0m"
 
-        elif cmd in ("fs.list", "dir", "get-childitem", "gci"):
-            target_dir = args[0] if args else self.variables["SYS.CWD"]
-            target_path = Path(os.path.abspath(os.path.join(self.variables["SYS.CWD"], target_dir)))
-            if not target_path.exists():
-                return f"Path not found: {target_dir}"
-            entries = sorted(list(target_path.iterdir()), key=lambda e: (not e.is_dir(), e.name.lower()))
-            res = [f"\033[1;36mMode                 LastWriteTime         Length Name ({target_path})\033[0m", "-"*72]
+        elif cmd in ("dir", "get-childitem", "gci"):
+            cur_u = self.variables.get("SYS.USER", "operator")
+            cwd = self.variables.get("SYS.CWD", f"/Users/{cur_u}/home")
+            v_arg = args[0] if args else cwd
+            phys, norm = self.storage.resolve_vpath(v_arg, cwd, cur_u)
+            if not phys.exists():
+                return f"\033[31mdir: Path not found: {v_arg}\033[0m"
+            entries = sorted(list(phys.iterdir()), key=lambda e: (not e.is_dir(), e.name.lower()))
+            res = [f"\033[1;36mMode                 LastWriteTime         Length Name ({norm})\033[0m", "-"*72]
             for e in entries:
                 display_name = e.name
-                if e.name == "Google Drive" and not self.google_drive.status()["authenticated"]:
-                    display_name += " (not connected)"
                 mode = "d-----" if e.is_dir() else "-a----"
                 mtime = time.strftime("%Y-%m-%d %H:%M", time.localtime(e.stat().st_mtime))
                 size_str = str(e.stat().st_size) if not e.is_dir() else ""
@@ -601,67 +1615,124 @@ Image Backing:     {self.storage.img_path.name}
 
         # Linux Commands
         elif cmd == "ls":
+            cur_u = self.variables.get("SYS.USER", "operator")
+            cwd = self.variables.get("SYS.CWD", f"/Users/{cur_u}/home")
             show_long = any(a in ("-l", "-la", "-al", "-lh") for a in args)
             show_all = any(a in ("-a", "-la", "-al") for a in args)
             raw_paths = [a for a in args if not a.startswith("-")]
-            target_dir = raw_paths[0] if raw_paths else self.variables["SYS.CWD"]
-            p = Path(os.path.abspath(os.path.join(self.variables["SYS.CWD"], target_dir)))
-            if not p.exists():
-                return f"ls: cannot access '{target_dir}': No such file or directory"
-            items = list(p.iterdir())
+            v_arg = raw_paths[0] if raw_paths else cwd
+            phys, norm = self.storage.resolve_vpath(v_arg, cwd, cur_u)
+            if not phys.exists():
+                return f"\033[31mls: cannot access '{v_arg}': No such file or directory\033[0m"
+            items = list(phys.iterdir())
             if not show_all:
                 items = [i for i in items if not i.name.startswith(".")]
             items.sort(key=lambda x: (not x.is_dir(), x.name.lower()))
             if not show_long:
                 names = []
                 for i in items:
-                    name = i.name
-                    if i.name == "Google Drive" and not self.google_drive.status()["authenticated"]:
-                        name += " (not connected)"
-                    names.append(f"\033[1;34m{name}/\033[0m" if i.is_dir() else name)
-                return "  ".join(names)
+                    names.append(f"\033[1;34m{i.name}/\033[0m" if i.is_dir() else i.name)
+                return "  ".join(names) if names else "(empty directory)"
             res = [f"total {len(items)}"]
             for i in items:
                 st = i.stat()
                 perms = "drwxr-xr-x" if i.is_dir() else "-rw-r--r--"
                 mtime = time.strftime("%b %d %H:%M", time.localtime(st.st_mtime))
-                name = i.name
-                if i.name == "Google Drive" and not self.google_drive.status()["authenticated"]:
-                    name += " (not connected)"
-                name_str = f"\033[1;34m{name}/\033[0m" if i.is_dir() else name
-                res.append(f"{perms} 1 operator operator {st.st_size:>8} {mtime} {name_str}")
+                name_str = f"\033[1;34m{i.name}/\033[0m" if i.is_dir() else i.name
+                res.append(f"{perms} 1 {cur_u} {cur_u} {st.st_size:>8} {mtime} {name_str}")
             return "\n".join(res)
 
         elif cmd == "pwd":
-            return self.variables["SYS.CWD"]
+            return self.variables.get("SYS.CWD", "/")
 
-        elif cmd in ("cat", "type", "get-content", "gc"):
-            if not args:
-                return f"Usage: {cmd} <file>"
-            fpath = Path(os.path.abspath(os.path.join(self.variables["SYS.CWD"], args[0])))
-            if not fpath.exists():
-                return f"{cmd}: {args[0]}: No such file or directory"
-            try:
-                return fpath.read_text(encoding="utf-8", errors="replace")
-            except Exception as e:
-                return f"{cmd}: error reading file: {e}"
+        elif cmd in ("hostname",):
+            return str(self.variables.get("SYS.HOSTNAME", "atlas"))
 
-        elif cmd == "touch":
+        elif cmd in ("env", "printenv"):
+            return "\n".join(f"{key}={value}" for key, value in sorted(self.variables.items()))
+
+        elif cmd == "id":
+            user = self.variables.get("SYS.USER", "operator")
+            return f"uid=1000({user}) gid=1000({user}) groups=1000({user})"
+
+        elif cmd == "which":
             if not args:
-                return "Usage: touch <filename>"
-            fpath = Path(os.path.abspath(os.path.join(self.variables["SYS.CWD"], args[0])))
-            fpath.touch(exist_ok=True)
+                return "Usage: which <command>"
+            name = args[0].lower()
+            return name if name in {c.lower() for c in self.get_command_list()} else f"which: no {args[0]} in Atlas PATH"
+
+        elif cmd == "echo":
+            return " ".join(args)
+
+        elif cmd == "true":
             return None
 
+        elif cmd == "false":
+            return "false"
+
+        elif cmd in ("cat", "type", "get-content", "gc"):
+            cur_u = self.variables.get("SYS.USER", "operator")
+            cwd = self.variables.get("SYS.CWD", f"/Users/{cur_u}/home")
+            if not args:
+                return f"Usage: {cmd} <file>"
+            phys, _ = self.storage.resolve_vpath(args[0], cwd, cur_u)
+            if not phys.exists():
+                return f"\033[31m{cmd}: {args[0]}: No such file or directory\033[0m"
+            try:
+                return phys.read_text(encoding="utf-8", errors="replace")
+            except Exception as e:
+                return f"\033[31m{cmd}: error reading file: {e}\033[0m"
+
+        elif cmd == "touch":
+            cur_u = self.variables.get("SYS.USER", "operator")
+            cwd = self.variables.get("SYS.CWD", f"/Users/{cur_u}/home")
+            if not args:
+                return "Usage: touch <filename>"
+            phys, _ = self.storage.resolve_vpath(args[0], cwd, cur_u)
+            phys.parent.mkdir(parents=True, exist_ok=True)
+            phys.touch(exist_ok=True)
+            return None
+
+        elif cmd == "mkdir":
+            cur_u = self.variables.get("SYS.USER", "operator")
+            cwd = self.variables.get("SYS.CWD", f"/Users/{cur_u}/home")
+            if not args:
+                return "Usage: mkdir <directory>"
+            self.storage.virtual_mkdir(args[0], cwd, cur_u)
+            return None
+
+        elif cmd in ("rm", "del"):
+            cur_u = self.variables.get("SYS.USER", "operator")
+            cwd = self.variables.get("SYS.CWD", f"/Users/{cur_u}/home")
+            if not args:
+                return f"Usage: {cmd} <path>"
+            target = args[0]
+            if any(ch in target for ch in "*?["):
+                parent_text, pattern = target.rsplit("/", 1) if "/" in target else (".", target)
+                parent_phys, parent_norm = self.storage.resolve_vpath(parent_text, cwd, cur_u)
+                matches = list(parent_phys.glob(pattern))
+                if not matches:
+                    return f"\033[31m{cmd}: cannot remove '{target}': No such file or directory\033[0m"
+                for match in matches:
+                    relative = f"{parent_norm.rstrip('/')}/{match.name}"
+                    self.storage.virtual_remove(relative, "/", cur_u)
+                return None
+            ok = self.storage.virtual_remove(target, cwd, cur_u)
+            if ok:
+                return None
+            return f"\033[31m{cmd}: cannot remove '{target}': No such file or directory\033[0m"
+
         elif cmd == "grep":
+            cur_u = self.variables.get("SYS.USER", "operator")
+            cwd = self.variables.get("SYS.CWD", f"/Users/{cur_u}/home")
             if len(args) < 2:
                 return "Usage: grep <pattern> <file>"
             pattern, filename = args[0], args[1]
-            fpath = Path(os.path.abspath(os.path.join(self.variables["SYS.CWD"], filename)))
-            if not fpath.exists():
-                return f"grep: {filename}: No such file or directory"
+            phys, _ = self.storage.resolve_vpath(filename, cwd, cur_u)
+            if not phys.exists():
+                return f"\033[31mgrep: {filename}: No such file or directory\033[0m"
             try:
-                lines = fpath.read_text(encoding="utf-8", errors="replace").splitlines()
+                lines = phys.read_text(encoding="utf-8", errors="replace").splitlines()
                 matches = []
                 regex = re.compile(pattern)
                 for i, l in enumerate(lines, 1):
@@ -670,23 +1741,115 @@ Image Backing:     {self.storage.img_path.name}
                         matches.append(f"\033[1;32m{i}\033[0m: {highlighted}")
                 return "\n".join(matches) if matches else "(no matches found)"
             except Exception as e:
-                return f"grep: error: {e}"
+                return f"\033[31mgrep: error: {e}\033[0m"
+
+        elif cmd in ("head", "tail"):
+            cur_u = self.variables.get("SYS.USER", "operator")
+            cwd = self.variables.get("SYS.CWD", f"/Users/{cur_u}/home")
+            if not args:
+                return f"Usage: {cmd} [-n NUM] <file>"
+            count = 10
+            file_arg = args[-1]
+            if len(args) >= 3 and args[0] == "-n":
+                try:
+                    count = int(args[1])
+                except ValueError:
+                    return f"{cmd}: invalid line count"
+            phys, _ = self.storage.resolve_vpath(file_arg, cwd, cur_u)
+            if not phys.exists():
+                return f"{cmd}: {file_arg}: No such file or directory"
+            lines = phys.read_text(encoding="utf-8", errors="replace").splitlines()
+            selected = lines[:count] if cmd == "head" else lines[-count:]
+            return "\n".join(selected)
+
+        elif cmd in ("sort", "uniq", "cut", "tr"):
+            cur_u = self.variables.get("SYS.USER", "operator")
+            cwd = self.variables.get("SYS.CWD", f"/Users/{cur_u}/home")
+            if not args:
+                return f"Usage: {cmd} <file>"
+            file_arg = args[-1]
+            phys, _ = self.storage.resolve_vpath(file_arg, cwd, cur_u)
+            if not phys.exists():
+                return f"{cmd}: {file_arg}: No such file or directory"
+            lines = phys.read_text(encoding="utf-8", errors="replace").splitlines()
+            if cmd == "sort":
+                return "\n".join(sorted(lines, reverse=("-r" in args)))
+            if cmd == "uniq":
+                result = []
+                for line in lines:
+                    if not result or result[-1] != line:
+                        result.append(line)
+                return "\n".join(result)
+            if cmd == "cut":
+                delimiter = "\t"
+                field = 1
+                if "-d" in args:
+                    delimiter = args[args.index("-d") + 1]
+                if "-f" in args:
+                    field = int(args[args.index("-f") + 1])
+                return "\n".join(row.split(delimiter)[field - 1] for row in lines if len(row.split(delimiter)) >= field)
+            if len(args) < 3:
+                return "Usage: tr <FROM> <TO> <file>"
+            return "\n".join(line.translate(str.maketrans(args[0], args[1])) for line in lines)
+
+        elif cmd in ("basename", "dirname", "realpath"):
+            if not args:
+                return f"Usage: {cmd} <path>"
+            target = Path(args[0].replace("\\", "/"))
+            if cmd == "basename":
+                return target.name
+            if cmd == "dirname":
+                return str(target.parent).replace("\\", "/")
+            cur_u = self.variables.get("SYS.USER", "operator")
+            cwd = self.variables.get("SYS.CWD", f"/Users/{cur_u}/home")
+            _, norm = self.storage.resolve_vpath(args[0], cwd, cur_u)
+            return norm
+
+        elif cmd in ("stat", "file", "du"):
+            cur_u = self.variables.get("SYS.USER", "operator")
+            cwd = self.variables.get("SYS.CWD", f"/Users/{cur_u}/home")
+            target = args[-1] if args else cwd
+            phys, norm = self.storage.resolve_vpath(target, cwd, cur_u)
+            if not phys.exists():
+                return f"{cmd}: cannot stat '{target}': No such file or directory"
+            if cmd == "file":
+                kind = "directory" if phys.is_dir() else "empty" if phys.stat().st_size == 0 else "regular file"
+                return f"{norm}: {kind}"
+            if cmd == "du":
+                total = sum(p.stat().st_size for p in phys.rglob("*") if p.is_file()) if phys.is_dir() else phys.stat().st_size
+                return f"{(total + 1023) // 1024}\t{norm}"
+            st = phys.stat()
+            kind = "directory" if phys.is_dir() else "regular file"
+            return f"  File: {norm}\n  Size: {st.st_size}\n  Type: {kind}\nModify: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(st.st_mtime))}"
+
+        elif cmd == "find":
+            cur_u = self.variables.get("SYS.USER", "operator")
+            cwd = self.variables.get("SYS.CWD", f"/Users/{cur_u}/home")
+            start = args[0] if args and not args[0].startswith("-") else "."
+            pattern = "*"
+            if "-name" in args and args.index("-name") + 1 < len(args):
+                pattern = args[args.index("-name") + 1]
+            phys, norm = self.storage.resolve_vpath(start, cwd, cur_u)
+            if not phys.exists():
+                return f"find: '{start}': No such file or directory"
+            matches = []
+            for entry in ([phys] if phys.is_file() else phys.rglob("*")):
+                if fnmatch.fnmatch(entry.name, pattern):
+                    try:
+                        _, entry_norm = self.storage.resolve_vpath(str(entry.relative_to(phys)) if entry != phys else ".", norm, cur_u)
+                        matches.append(entry_norm)
+                    except Exception:
+                        matches.append(str(entry))
+            return "\n".join(matches)
 
         elif cmd == "df":
-            storage_info = self.storage.get_disk_info()
-            total_k = storage_info['capacity_bytes'] // 1024
-            used_k = storage_info['used_bytes'] // 1024
-            free_k = storage_info['free_bytes'] // 1024
-            pct = round((storage_info['used_bytes'] / storage_info['capacity_bytes']) * 100, 1)
-            return f"""\033[1;36mFilesystem               1K-blocks      Used Available Use% Mounted on\033[0m
-/dev/nvme0n1_operator      {total_k:,}    {used_k:,}   {free_k:,}  {pct}% /
-opfs_vfs                   1,048,576       32,768   1,015,808   3.1% /mnt/vfs
-host_bridge               33,554,432    8,388,608  25,165,824  25.0% /mnt/host"""
+            return self.format_df()
 
         elif cmd == "free":
-            return """\033[1;36m               total        used        free      shared  buff/cache   available\033[0m
-Mem:         8192000     1450200     5621800      124000     1120000     6410000
-Swap:        2097152           0     2097152"""
+            return self.format_free()
+
+        elif cmd == "mem":
+            return self.format_free()
 
         elif cmd == "uname":
             flag = args[0] if args else "-s"
@@ -702,17 +1865,244 @@ Swap:        2097152           0     2097152"""
             return " 16:45:00 up 4:18,  1 user,  load average: 0.12, 0.08, 0.05"
 
         elif cmd == "wc":
+            cur_u = self.variables.get("SYS.USER", "operator")
+            cwd = self.variables.get("SYS.CWD", f"/Users/{cur_u}/home")
             if not args:
                 return "Usage: wc [-l|-w|-c] <file>"
             target_f = args[-1]
-            fpath = Path(os.path.abspath(os.path.join(self.variables["SYS.CWD"], target_f)))
-            if not fpath.exists():
-                return f"wc: {target_f}: No such file or directory"
-            text = fpath.read_text(encoding="utf-8", errors="replace")
+            phys, _ = self.storage.resolve_vpath(target_f, cwd, cur_u)
+            if not phys.exists():
+                return f"\033[31mwc: {target_f}: No such file or directory\033[0m"
+            text = phys.read_text(encoding="utf-8", errors="replace")
             lines_c = len(text.splitlines())
             words_c = len(text.split())
             bytes_c = len(text.encode("utf-8"))
             return f"{lines_c:>8} {words_c:>8} {bytes_c:>8} {target_f}"
+
+        # Enhanced File & Directory Features
+        elif cmd in ("cp", "copy"):
+            if len(args) < 2:
+                return f"Usage: {cmd} [-r] <source> <destination>"
+            recursive = "-r" in args or "-R" in args
+            paths = [a for a in args if not a.startswith("-")]
+            if len(paths) < 2:
+                return f"Usage: {cmd} [-r] <source> <destination>"
+            src_str, dst_str = paths[0], paths[1]
+            cur_u = self.variables.get("SYS.USER", "operator")
+            cwd = self.variables.get("SYS.CWD", f"/Users/{cur_u}/home")
+            src_phys, src_norm = self.storage.resolve_vpath(src_str, cwd, cur_u)
+            dst_phys, dst_norm = self.storage.resolve_vpath(dst_str, cwd, cur_u)
+            if not src_phys.exists():
+                return f"\033[31m{cmd}: cannot stat '{src_str}': No such file or directory\033[0m"
+            try:
+                if src_phys.is_dir():
+                    if not recursive:
+                        return f"\033[31m{cmd}: -r not specified; omitting directory '{src_str}'\033[0m"
+                    if dst_phys.exists() and dst_phys.is_dir():
+                        final_dst = dst_phys / src_phys.name
+                    else:
+                        final_dst = dst_phys
+                    shutil.copytree(src_phys, final_dst, dirs_exist_ok=True)
+                else:
+                    if dst_phys.is_dir():
+                        final_dst = dst_phys / src_phys.name
+                    else:
+                        final_dst = dst_phys
+                        final_dst.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(src_phys, final_dst)
+                return None
+            except Exception as e:
+                return f"\033[31m{cmd}: error: {e}\033[0m"
+
+        elif cmd in ("mv", "move", "rename", "ren"):
+            if len(args) < 2:
+                return f"Usage: {cmd} <source> <destination>"
+            src_str, dst_str = args[0], args[1]
+            cur_u = self.variables.get("SYS.USER", "operator")
+            cwd = self.variables.get("SYS.CWD", f"/Users/{cur_u}/home")
+            src_phys, src_norm = self.storage.resolve_vpath(src_str, cwd, cur_u)
+            dst_phys, dst_norm = self.storage.resolve_vpath(dst_str, cwd, cur_u)
+            if not src_phys.exists():
+                return f"\033[31m{cmd}: cannot stat '{src_str}': No such file or directory\033[0m"
+            try:
+                if dst_phys.is_dir():
+                    final_dst = dst_phys / src_phys.name
+                else:
+                    final_dst = dst_phys
+                    final_dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(src_phys), str(final_dst))
+                return None
+            except Exception as e:
+                return f"\033[31m{cmd}: error: {e}\033[0m"
+
+        elif cmd in ("rmdir", "rd"):
+            if not args:
+                return f"Usage: {cmd} <directory>"
+            cur_u = self.variables.get("SYS.USER", "operator")
+            cwd = self.variables.get("SYS.CWD", f"/Users/{cur_u}/home")
+            phys, norm = self.storage.resolve_vpath(args[0], cwd, cur_u)
+            if not phys.exists() or not phys.is_dir():
+                return f"\033[31m{cmd}: failed to remove '{args[0]}': No such directory\033[0m"
+            try:
+                phys.rmdir()
+                return None
+            except OSError:
+                return f"\033[31m{cmd}: failed to remove '{args[0]}': Directory not empty\033[0m"
+
+        elif cmd == "md":
+            return self.eval_command(f"mkdir {' '.join(args)}")
+
+        # macOS Utilities
+        elif cmd == "sw_vers":
+            return """ProductName:\tAtlas macOS Subsystem Bridge
+ProductVersion:\t15.4 (Atlas Darwin 24.4.0)
+BuildVersion:\t24E248 (Atlas Kernel x86_64)"""
+
+        elif cmd in ("pbcopy",):
+            text = " ".join(args) if args else ""
+            if not text and not sys.stdin.isatty():
+                try:
+                    text = sys.stdin.read()
+                except Exception:
+                    pass
+            self.win.clipboard_set(text)
+            return None
+
+        elif cmd in ("pbpaste",):
+            return self.win.clipboard_get()
+
+        elif cmd == "say":
+            if not args:
+                return "Usage: say <message>"
+            msg = " ".join(args)
+            try:
+                script = f"Add-Type -AssemblyName System.Speech; (New-Object System.Speech.Synthesis.SpeechSynthesizer).Speak('{msg}')"
+                subprocess.Popen(["powershell", "-NoProfile", "-Command", script])
+                return f"[Speaking: \"{msg}\"]"
+            except Exception:
+                return f"[Voice synthesizer output: \"{msg}\"]"
+
+        elif cmd == "open":
+            if not args:
+                return "Usage: open <file|url|app>"
+            target = args[0]
+            if target.startswith(("http://", "https://")):
+                import webbrowser
+                webbrowser.open(target)
+                return f"Opened {target} in default browser."
+            cur_u = self.variables.get("SYS.USER", "operator")
+            cwd = self.variables.get("SYS.CWD", f"/Users/{cur_u}/home")
+            phys, norm = self.storage.resolve_vpath(target, cwd, cur_u)
+            if phys.exists():
+                os.startfile(str(phys))
+                return f"Opened {norm}"
+            return f"open: cannot open '{target}': No such file or directory"
+
+        elif cmd == "cal":
+            import calendar
+            now = time.localtime()
+            year = int(args[1]) if len(args) > 1 and args[1].isdigit() else now.tm_year
+            month = int(args[0]) if args and args[0].isdigit() else now.tm_mon
+            return calendar.month(year, month)
+
+        elif cmd == "history":
+            hist = self.storage.load_command_history()
+            res = []
+            for idx, h in enumerate(hist[-50:], 1):
+                res.append(f"{idx:>5}  {h}")
+            return "\n".join(res) if res else "No command history recorded."
+
+        elif cmd == "alias":
+            if not args:
+                return """alias ll='ls -l'
+alias la='ls -a'
+alias edit='nano'
+alias pico='nano'
+alias sudo='passd'
+alias cp='copy'
+alias mv='move'
+alias cls='clear'
+alias md='mkdir'
+alias rd='rmdir'"""
+            return f"alias {args[0]} registered."
+
+        elif cmd == "watch":
+            if not args:
+                return "Usage: watch [-n seconds] <command>"
+            interval = 2
+            sub_cmd = args
+            if len(args) >= 3 and args[0] == "-n":
+                try:
+                    interval = int(args[1])
+                    sub_cmd = args[2:]
+                except ValueError:
+                    pass
+            full_sub = " ".join(sub_cmd)
+            res = self.eval_command(full_sub)
+            now_str = time.strftime("%a %b %d %H:%M:%S %Y")
+            header = f"Every {interval}.0s: {full_sub:<40} {now_str}"
+            return f"{header}\n{'-'*len(header)}\n{res or ''}"
+
+        # Windows Utilities
+        elif cmd == "winver":
+            return """Microsoft Windows [Version 10.0.26100.3194]
+Atlas OS Windows Subsystem Integration Layer [v2.0.0-PRO]
+Licensed to: Operator Node (Workstation Edition)"""
+
+        elif cmd in ("tasklist",):
+            target_filter = args[0].lower() if args else None
+            procs = self.proc_mgr.get_top()
+            if target_filter:
+                procs = [p for p in procs if target_filter in p['cmd'].lower()]
+            res = [
+                f"\033[1;36mImage Name                     PID Session Name        Session#    Mem Usage\033[0m",
+                "="*75
+            ]
+            for p in procs:
+                img_name = p['cmd'].split()[0] if p['cmd'] else "proc"
+                mem_k = f"{p['pid'] * 1024:,} K"
+                res.append(f"{img_name:<28} {p['pid']:<6} Console                    1   {mem_k:>10}")
+            return "\n".join(res)
+
+        elif cmd in ("taskkill", "kill"):
+            cur_u = self.variables.get("SYS.USER", "operator")
+            if cur_u != "root":
+                return f"\033[31m[PERMISSION DENIED]\033[0m Terminating system processes requires superuser privileges.\nUse: \033[1;36mpassd {line}\033[0m"
+            if not args:
+                return f"Usage: {cmd} [/PID pid] [/IM imagename] [/F] or kill <pid>"
+            pid = None
+            for idx, a in enumerate(args):
+                if a.upper() in ("/PID", "-P", "-PID") and idx + 1 < len(args):
+                    pid = int(args[idx + 1])
+                    break
+                elif a.isdigit():
+                    pid = int(a)
+                    break
+            if pid is not None:
+                ok = self.proc_mgr.signal_process(pid, "SIGKILL")
+                return f"\033[1;32mSUCCESS:\033[0m Sent termination signal to process with PID {pid}." if ok else f"\033[31mERROR:\033[0m Process PID {pid} not found."
+            return f"{cmd}: Please specify a valid /PID or integer PID."
+
+        elif cmd == "netstat":
+            return """Active Connections
+
+  Proto  Local Address          Foreign Address        State
+  TCP    0.0.0.0:80             0.0.0.0:0              LISTENING
+  TCP    0.0.0.0:443            0.0.0.0:0              LISTENING
+  TCP    127.0.0.1:5432         0.0.0.0:0              LISTENING
+  TCP    127.0.0.1:6379         0.0.0.0:0              LISTENING
+  TCP    192.168.1.100:52410    1.1.1.1:53             ESTABLISHED"""
+
+        elif cmd in ("shutdown", "reboot", "restart-computer", "stop-computer"):
+            cur_u = self.variables.get("SYS.USER", "operator")
+            if cur_u != "root":
+                return f"\033[31m[PERMISSION DENIED]\033[0m System power operations require superuser privileges.\nUse: \033[1;36mpassd {line}\033[0m"
+            action = "restarting" if cmd in ("reboot", "restart-computer") or "-r" in args or "/r" in args else "shutting down"
+            return (
+                f"\033[1;33m[SYSTEM BROADCAST]\033[0m The Atlas OS subsystem is {action} now!\n"
+                "All virtual page buffers committed to 2GB block device storage.\n"
+                "Goodbye!"
+            )
 
         # PowerShell Commands
         elif cmd in ("get-process", "ps"):
@@ -768,21 +2158,40 @@ CompositorEngine          : C++ Window Manager Compositor (Direct GDI Vector UI)
             return self.eval_command("net.ifconfig")
 
         elif cmd == "tree":
-            target_dir = args[0] if args else self.variables["SYS.CWD"]
-            p = Path(os.path.abspath(os.path.join(self.variables["SYS.CWD"], target_dir)))
-            if not p.exists():
-                return f"Path not found: {target_dir}"
-            lines = [f"Folder PATH listing for volume /dev/nvme0n1_operator", f"Volume serial number is OP-2026", str(p)]
-            for root, dirs, files in os.walk(str(p)):
-                depth = root.replace(str(p), "").count(os.sep)
-                if depth > 2:
-                    continue
-                indent = "│   " * depth
-                for d in dirs[:5]:
-                    lines.append(f"{indent}├── {d}")
-                for f in files[:8]:
-                    lines.append(f"{indent}└── {f}")
-            return "\n".join(lines[:35])
+            cur_u = self.variables.get("SYS.USER", "operator")
+            cwd = self.variables.get("SYS.CWD", f"/Users/{cur_u}/home")
+            path_args = [a for a in args if not a.startswith("-")]
+            v_arg = path_args[0] if path_args else cwd
+            phys, norm = self.storage.resolve_vpath(v_arg, cwd, cur_u)
+            if not phys.exists():
+                return f"\033[31mPath not found in Atlas OS storage: {v_arg}\033[0m"
+            out_lines = [
+                "\033[1;36mAtlas OS - 2GB Storage Filesystem Tree\033[0m",
+                f"\033[1;33mVolume:\033[0m /dev/nvme0n1_operator  \033[1;33mMount:\033[0m /",
+                f"\033[1;32m{norm}\033[0m"
+            ]
+            def walk_vfs(directory: "Path", vpath: str, depth: int, prefix: str):
+                if depth > 4:
+                    return
+                try:
+                    entries = sorted(directory.iterdir(), key=lambda e: (not e.is_dir(), e.name.lower()))
+                except PermissionError:
+                    return
+                for idx, entry in enumerate(entries):
+                    is_last = (idx == len(entries) - 1)
+                    connector = "└── " if is_last else "├── "
+                    child_vpath = f"{vpath.rstrip('/')}/{entry.name}"
+                    if entry.is_dir():
+                        out_lines.append(f"{prefix}{connector}\033[1;34m{entry.name}/\033[0m")
+                        extension = "    " if is_last else "│   "
+                        walk_vfs(entry, child_vpath, depth + 1, prefix + extension)
+                    else:
+                        out_lines.append(f"{prefix}{connector}{entry.name}")
+                    if len(out_lines) > 80:
+                        return
+            walk_vfs(phys, norm, 0, "")
+            return "\n".join(out_lines)
+
 
         elif cmd in ("cls", "clear"):
             os.system("cls" if os.name == "nt" else "clear")
@@ -807,6 +2216,11 @@ CompositorEngine          : C++ Window Manager Compositor (Direct GDI Vector UI)
                             proc = proc_ps
 
                 output = (proc.stdout + proc.stderr).strip()
+                # Never leak host-specific Windows exception names through the
+                # Operator CLI. Normalize them to the platform-independent
+                # AtlasError vocabulary.
+                output = re.sub(r"WinError\s*\d+", "AtlasError", output, flags=re.IGNORECASE)
+                output = output.replace("[Command Error]", "[AtlasError]")
                 if output:
                     return output
                 elif proc.returncode != 0:
@@ -815,7 +2229,8 @@ CompositorEngine          : C++ Window Manager Compositor (Direct GDI Vector UI)
             except subprocess.TimeoutExpired:
                 return "\033[31m[Command Timeout]: Process took longer than 30 seconds.\033[0m"
             except Exception as e:
-                return f"\033[31m[Command Error]: '{cmd}': {str(e)}\033[0m"
+                detail = re.sub(r"WinError\s*\d+", "AtlasError", str(e), flags=re.IGNORECASE)
+                return f"\033[31m[AtlasError]: '{cmd}': {detail}\033[0m"
 
     def query_db(self, query: str):
         if not DB_PATH.exists():
@@ -841,11 +2256,26 @@ CompositorEngine          : C++ Window Manager Compositor (Direct GDI Vector UI)
 
     def read_interactive_line(self):
         """
-        Robust interactive console line reader supporting standard terminal input,
-        paste, backspace, unicode, and persistent 2GB storage history logging.
+        Interactive console line reader powered by prompt_toolkit.
+        Supports tab auto-completion, arrow-key command history, and direct terminal input.
         """
+        if self.prompt_session and sys.stdin.isatty():
+            try:
+                line = self.prompt_session.prompt(
+                    ANSI(self.get_prompt_text()),
+                    completer=self.completer,
+                )
+                cmd_str = line.strip()
+                if cmd_str:
+                    self.storage.append_command_history(cmd_str)
+                return cmd_str
+            except (KeyboardInterrupt, EOFError):
+                raise
+            except Exception:
+                pass
+
         try:
-            line = input(self.get_prompt())
+            line = input(self.get_prompt_text())
             cmd_str = line.strip()
             if cmd_str:
                 self.storage.append_command_history(cmd_str)
@@ -853,18 +2283,48 @@ CompositorEngine          : C++ Window Manager Compositor (Direct GDI Vector UI)
         except (KeyboardInterrupt, EOFError):
             raise
 
+def print_banner():
+    c = Console()
+    if os.environ.get("OPERATOR_QUIET_START") == "1":
+        c.print("[bold green]Operator Shell ready.[/bold green] Type [bold white]help[/bold white] for commands.")
+        return
+
+    logo = """[bold cyan]
+      █████╗ ████████╗██╗      █████╗ ███████╗     ██████╗ ███████╗
+     ██╔══██╗╚══██╔══╝██║     ██╔══██╗██╔════╝    ██╔═══██╗██╔════╝
+     ███████║   ██║   ██║     ███████║███████╗    ██║   ██║███████╗
+     ██╔══██║   ██║   ██║     ██╔══██║╚════██║    ██║   ██║╚════██║
+     ██║  ██║   ██║   ███████╗██║  ██║███████║    ╚██████╔╝███████║
+     ╚═╝  ╚═╝   ╚═╝   ╚══════╝╚═╝  ╚═╝╚══════╝     ╚═════╝ ╚══════╝[/bold cyan]"""
+    c.print(logo)
+
+    banner_panel = Panel(
+        Text.from_markup(
+            "[bold white]ATLAS OS POLYGLOT SUBSYSTEM & SCRIPT ENGINE (v2.0-PRO)[/bold white]\n"
+            "[cyan]• Inbuilt Code Editor:[/cyan] [bold yellow]Operator Editor[/bold yellow] (Type [bold green]nano <file>[/bold green] to edit)\n"
+            "[cyan]• Virtual Storage:[/cyan] 2GB Dedicated EXT-OPFS Block Storage Device\n"
+            "[cyan]• Multi-Engine Shell:[/cyan] Native .opsh, Linux/WSL .sh, PowerShell .ps1, Batch .bat\n"
+            "[cyan]• Interactive Navigation:[/cyan] Tab Auto-Completion, History (↑/↓), Rich Diagnostics\n"
+            "[dim]Type [bold white]help[/bold white] for command reference or [bold white]exit[/bold white] to leave.[/dim]"
+        ),
+        box=ROUNDED,
+        border_style="bold cyan",
+        title="[bold cyan]⚡ SYSTEM ONLINE ⚡[/bold cyan]",
+        title_align="center",
+    )
+    c.print(banner_panel)
+
 def main():
     engine = OperatorShellEngine()
-    print("\033[1;36m================================================================")
-    print("      OPERATOR OS POLYGLOT SCRIPT & SHELL SUBSYSTEM (v2.0)      ")
-    print("      Supports .sh, .ps1, .bat, .opsh Script File Execution     ")
-    print("      Persistent 2GB Storage Command History (UP/DOWN keys)     ")
-    print("      Distinct Vocabulary: Type 'help' to inspect commands      ")
-    print("================================================================\033[0m")
+    print_banner()
 
     if len(sys.argv) > 1:
-        raw_input_cmd = " ".join(sys.argv[1:])
+        bridge_mode = sys.argv[1] == "--bridge"
+        raw_input_cmd = " ".join(sys.argv[2:] if bridge_mode else sys.argv[1:])
         tokens = shlex.split(raw_input_cmd)
+        if bridge_mode and (not tokens or (not tokens[0].startswith("net.") and not tokens[0].startswith("drive."))):
+            print("[OPSH BRIDGE] Only network and Drive commands are available through POW.")
+            return
         target = tokens[0]
         # Append executed CLI commands to persistent storage
         engine.storage.append_command_history(raw_input_cmd)

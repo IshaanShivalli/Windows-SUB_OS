@@ -1,5 +1,7 @@
 import socket
 import urllib.request
+import urllib.error
+import urllib.parse
 import json
 import time
 
@@ -53,14 +55,64 @@ class OperatorNetworkStack:
 
     def http_fetch(self, url: str):
         try:
-            req = urllib.request.Request(url, headers={"User-Agent": "OperatorOS-NetStack/1.0"})
-            with urllib.request.urlopen(req, timeout=5) as resp:
-                status = resp.status
-                headers = dict(resp.getheaders())
-                body = resp.read(2048).decode("utf-8", errors="ignore")
-                return {"url": url, "status_code": status, "headers": headers, "preview": body}
+            response = self.http_request("GET", url, timeout=5, max_bytes=2048)
+            if response["status_code"] >= 400:
+                return {
+                    "url": url,
+                    "error": f"HTTP {response['status_code']}",
+                }
+            body = response["body"][:2048].decode("utf-8", errors="ignore")
+            return {
+                "url": url,
+                "status_code": response["status_code"],
+                "headers": response["headers"],
+                "preview": body,
+            }
         except Exception as e:
             return {"url": url, "error": str(e)}
+
+    def http_request(
+        self,
+        method: str,
+        url: str,
+        data: bytes = None,
+        headers: dict = None,
+        timeout: float = 15,
+        max_bytes: int = 10 * 1024 * 1024,
+    ):
+        parsed_url = urllib.parse.urlsplit(url)
+        if parsed_url.scheme not in ("http", "https") or not parsed_url.hostname:
+            raise ValueError("HTTP request URL must use http or https and include a hostname")
+        if parsed_url.username or parsed_url.password:
+            raise ValueError("Credentials must not be embedded in an HTTP request URL")
+        if method.upper() not in {"GET", "POST", "PUT", "PATCH", "DELETE"}:
+            raise ValueError(f"Unsupported HTTP method: {method}")
+        if max_bytes <= 0:
+            raise ValueError("max_bytes must be positive")
+
+        request_headers = {"User-Agent": "OperatorOS-NetStack/1.0"}
+        request_headers.update(headers or {})
+        request = urllib.request.Request(
+            url,
+            data=data,
+            headers=request_headers,
+            method=method.upper(),
+        )
+        try:
+            response = urllib.request.urlopen(request, timeout=timeout)
+        except urllib.error.HTTPError as error_response:
+            response = error_response
+
+        with response:
+            body = response.read(max_bytes + 1)
+            truncated = len(body) > max_bytes
+            return {
+                "url": url,
+                "status_code": response.status,
+                "headers": dict(response.headers.items()),
+                "body": body[:max_bytes],
+                "truncated": truncated,
+            }
 
 if __name__ == "__main__":
     net = OperatorNetworkStack()

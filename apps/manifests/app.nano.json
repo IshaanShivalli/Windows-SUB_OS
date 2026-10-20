@@ -1,0 +1,11 @@
+{
+  "name": "Operator Code Editor",
+  "app_id": "app.nano",
+  "runtime": "python",
+  "entrypoint": "apps/nano.py",
+  "permissions": [
+    "filesystem",
+    "terminal"
+  ],
+  "exec_cmd": "python apps/nano.py"
+}

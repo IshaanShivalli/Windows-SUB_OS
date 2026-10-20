@@ -1,0 +1,15 @@
+{
+  "id": "editor.lang.c",
+  "name": "Operator Editor C Extension",
+  "version": "1.0.0",
+  "runtime": "editor-extension",
+  "entrypoint": "apps/nano.py",
+  "deps": ["app.editor"],
+  "signature": "SHA256:b9fd1365d83d5405d78e72e30c65cc93d7ed9e3d",
+  "desc": "C syntax completion for the Operator code editor",
+  "editor_extension": {
+    "language": "C",
+    "file_extensions": [".c", ".h"],
+    "completions": ["auto", "break", "case", "char", "const", "continue", "default", "do", "double", "else", "enum", "extern", "float", "for", "goto", "if", "inline", "int", "long", "register", "restrict", "return", "short", "signed", "sizeof", "static", "struct", "switch", "typedef", "union", "unsigned", "void", "volatile", "while", "bool", "size_t", "NULL", "printf", "scanf", "malloc", "calloc", "realloc", "free", "memcpy", "memset", "strlen"]
+  }
+}

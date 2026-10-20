@@ -1,0 +1,15 @@
+{
+  "id": "editor.lang.typescript",
+  "name": "Operator Editor TypeScript Extension",
+  "version": "1.0.0",
+  "runtime": "editor-extension",
+  "entrypoint": "apps/nano.py",
+  "deps": ["app.editor"],
+  "signature": "SHA256:ed426546e5023378bcfb234a3bc08532bdbb4adc",
+  "desc": "TypeScript syntax completion for the Operator code editor",
+  "editor_extension": {
+    "language": "TypeScript",
+    "file_extensions": [".ts", ".tsx"],
+    "completions": ["abstract", "any", "as", "async", "await", "boolean", "break", "case", "catch", "class", "const", "constructor", "continue", "declare", "default", "delete", "enum", "export", "extends", "false", "finally", "for", "from", "function", "if", "implements", "import", "in", "interface", "is", "keyof", "let", "namespace", "never", "new", "null", "number", "of", "private", "protected", "public", "readonly", "return", "static", "string", "super", "this", "throw", "true", "try", "type", "typeof", "undefined", "unknown", "var", "void", "while", "yield", "Promise", "Array", "Record", "Partial"]
+  }
+}

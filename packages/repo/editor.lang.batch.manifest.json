@@ -1,0 +1,15 @@
+{
+  "id": "editor.lang.batch",
+  "name": "Operator Editor Windows Batch Extension",
+  "version": "1.0.0",
+  "runtime": "editor-extension",
+  "entrypoint": "apps/nano.py",
+  "deps": ["app.editor"],
+  "signature": "SHA256:0b5f692010280d0ce5809f2bc03905850e085a1e",
+  "desc": "Windows batch and command prompt completion for the Operator code editor",
+  "editor_extension": {
+    "language": "Windows Batch",
+    "file_extensions": [".bat", ".cmd"],
+    "completions": ["call", "cd", "chcp", "cls", "copy", "del", "dir", "echo", "endlocal", "exit", "for", "goto", "if", "md", "mkdir", "move", "path", "pause", "popd", "pushd", "ren", "rename", "rmdir", "set", "setlocal", "start", "type"]
+  }
+}

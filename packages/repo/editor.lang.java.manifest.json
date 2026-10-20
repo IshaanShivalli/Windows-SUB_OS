@@ -1,0 +1,15 @@
+{
+  "id": "editor.lang.java",
+  "name": "Operator Editor Java Extension",
+  "version": "1.0.0",
+  "runtime": "editor-extension",
+  "entrypoint": "apps/nano.py",
+  "deps": ["app.editor"],
+  "signature": "SHA256:089bf5f18097dcad451858740dffcd271c87ad34",
+  "desc": "Java syntax completion for the Operator code editor",
+  "editor_extension": {
+    "language": "Java",
+    "file_extensions": [".java"],
+    "completions": ["abstract", "assert", "boolean", "break", "byte", "case", "catch", "char", "class", "const", "continue", "default", "do", "double", "else", "enum", "extends", "final", "finally", "float", "for", "if", "implements", "import", "instanceof", "int", "interface", "long", "native", "new", "package", "private", "protected", "public", "return", "short", "static", "strictfp", "super", "switch", "synchronized", "this", "throw", "throws", "transient", "try", "void", "volatile", "while", "String", "System", "Override", "List", "Map", "Optional", "ArrayList", "HashMap", "println"]
+  }
+}

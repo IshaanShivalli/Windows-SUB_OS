@@ -1,0 +1,15 @@
+{
+  "id": "editor.lang.rust",
+  "name": "Operator Editor Rust Extension",
+  "version": "1.0.0",
+  "runtime": "editor-extension",
+  "entrypoint": "apps/nano.py",
+  "deps": ["app.editor"],
+  "signature": "SHA256:9e12ddcff9f6e1214bf58e583d459fa27b8c0bb4",
+  "desc": "Rust syntax completion for the Operator code editor",
+  "editor_extension": {
+    "language": "Rust",
+    "file_extensions": [".rs"],
+    "completions": ["as", "async", "await", "break", "const", "continue", "crate", "dyn", "else", "enum", "extern", "false", "fn", "for", "if", "impl", "in", "let", "loop", "match", "mod", "move", "mut", "pub", "ref", "return", "self", "Self", "static", "struct", "super", "trait", "true", "type", "unsafe", "use", "where", "while", "Result", "Option", "String", "Vec", "Box", "Some", "None", "Ok", "Err", "println", "format"]
+  }
+}

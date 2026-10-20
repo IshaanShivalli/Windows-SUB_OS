@@ -1,7 +1,4 @@
-# Operator OS currently uses Python's standard library only.
-# Keep this file so environments and future optional dependencies have a
-# single installation entry point.
-# Optional Google Drive runtime integration:
-google-api-python-client>=2.140.0
-google-auth>=2.35.0
-google-auth-oauthlib>=1.2.1
+google-api-python-client
+google-auth-httplib2
+google-auth-oauthlib
+paramiko>=3.4,<5

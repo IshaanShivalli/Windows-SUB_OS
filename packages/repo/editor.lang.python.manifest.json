@@ -1,0 +1,15 @@
+{
+  "id": "editor.lang.python",
+  "name": "Operator Editor Python Extension",
+  "version": "1.0.0",
+  "runtime": "editor-extension",
+  "entrypoint": "apps/nano.py",
+  "deps": ["app.editor"],
+  "signature": "SHA256:1ea36da486a78c6716e0c58bbcefa4a65d471a49",
+  "desc": "Python syntax completion for the Operator code editor",
+  "editor_extension": {
+    "language": "Python",
+    "file_extensions": [".py", ".pyw"],
+    "completions": ["and", "as", "assert", "async", "await", "break", "class", "continue", "def", "del", "elif", "else", "except", "False", "finally", "for", "from", "global", "if", "import", "in", "is", "lambda", "None", "nonlocal", "not", "or", "pass", "raise", "return", "self", "True", "try", "while", "with", "yield", "print", "len", "range", "str", "int", "float", "list", "dict", "set", "tuple", "super", "property", "staticmethod", "classmethod"]
+  }
+}

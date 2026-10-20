@@ -1,0 +1,15 @@
+{
+  "id": "editor.lang.cpp",
+  "name": "Operator Editor C++ Extension",
+  "version": "1.0.0",
+  "runtime": "editor-extension",
+  "entrypoint": "apps/nano.py",
+  "deps": ["app.editor"],
+  "signature": "SHA256:6e7b3231600a5ae86c547de9862274f9b5e82602",
+  "desc": "C++ syntax completion for the Operator code editor",
+  "editor_extension": {
+    "language": "C++",
+    "file_extensions": [".cc", ".cpp", ".cxx", ".hpp", ".hh", ".hxx"],
+    "completions": ["alignas", "alignof", "auto", "bool", "break", "case", "catch", "char", "class", "const", "constexpr", "continue", "decltype", "default", "delete", "do", "double", "else", "enum", "explicit", "export", "extern", "false", "float", "for", "friend", "if", "inline", "int", "long", "namespace", "new", "noexcept", "nullptr", "operator", "private", "protected", "public", "return", "short", "signed", "sizeof", "static", "struct", "switch", "template", "this", "throw", "true", "try", "typedef", "typename", "union", "unsigned", "using", "virtual", "void", "volatile", "while", "std", "string", "vector", "unique_ptr", "shared_ptr", "cout", "cin"]
+  }
+}

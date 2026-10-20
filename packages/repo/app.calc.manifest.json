@@ -1,0 +1,12 @@
+{
+  "id": "app.calc",
+  "name": "Operator Scientific Calculator",
+  "version": "1.2.0",
+  "runtime": "java",
+  "entrypoint": "runtime_java/bin/OperatorRuntime.jar",
+  "deps": [
+    "core.ovm"
+  ],
+  "signature": "SHA256:d8a9f029381cbb471e9",
+  "desc": "Precision mathematical engine with trigonometric sandboxing"
+}
