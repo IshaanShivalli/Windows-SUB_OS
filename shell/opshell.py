@@ -873,12 +873,7 @@ class OperatorShellEngine:
             cur_user = self.variables.get("SYS.USER", "operator")
             if setup_only:
                 if self.user_mgr.has_passd_password(cur_user):
-                    now = time.time()
-                    cached_ok = (
-                        self._passd_auth_cache.get("user") == cur_user
-                        and now - self._passd_auth_cache.get("timestamp", 0) < 300
-                    )
-                    if not cached_ok and not self._authenticate_passd(cur_user):
+                    if not self._authenticate_passd(cur_user):
                         return (
                             "\033[31m[PASSD AUTH ERROR]\033[0m "
                             "Password setup requires the current passd password."

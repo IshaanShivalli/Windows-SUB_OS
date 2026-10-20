@@ -1,5 +1,6 @@
 import sqlite3
 import tempfile
+import time
 import unittest
 from contextlib import closing
 from pathlib import Path
@@ -112,6 +113,54 @@ class PassdAndCompletionTests(unittest.TestCase):
         self.assertEqual(shell.variables["SYS.USER"], "operator")
         self.assertNotIn("SYS.PASSD_ACTIVE", shell.variables)
         self.assertEqual(evaluate.call_args.args[0], "true")
+
+    def test_passd_setup_requires_current_password_even_with_valid_auth_cache(self):
+        manager = Mock()
+        manager.has_passd_password.return_value = True
+        manager.verify_passd_password.return_value = True
+        shell = OperatorShellEngine.__new__(OperatorShellEngine)
+        shell.variables = {"SYS.USER": "operator"}
+        shell._passd_auth_cache = {"user": "operator", "timestamp": time.time()}
+        shell.user_mgr = manager
+
+        with patch("shell.opshell.sys.stdin.isatty", return_value=True), patch(
+            "getpass.getpass",
+            side_effect=[
+                "current-passd-password",
+                "replacement-passd-password",
+                "replacement-passd-password",
+            ],
+        ):
+            result = shell.eval_command("passd.setup")
+
+        self.assertEqual(result, "passd password set for 'operator'.")
+        manager.verify_passd_password.assert_called_once_with(
+            "operator",
+            "current-passd-password",
+        )
+        manager.set_passd_password.assert_called_once_with(
+            "operator",
+            "replacement-passd-password",
+        )
+
+    def test_passd_setup_does_not_change_password_when_current_password_fails(self):
+        manager = Mock()
+        manager.has_passd_password.return_value = True
+        manager.verify_passd_password.return_value = False
+        shell = OperatorShellEngine.__new__(OperatorShellEngine)
+        shell.variables = {"SYS.USER": "operator"}
+        shell._passd_auth_cache = {"user": "operator", "timestamp": time.time()}
+        shell.user_mgr = manager
+
+        with patch("shell.opshell.sys.stdin.isatty", return_value=True), patch(
+            "getpass.getpass",
+            side_effect=["wrong-one", "wrong-two", "wrong-three"],
+        ):
+            result = shell.eval_command("passd.setup")
+
+        self.assertIn("Password setup requires the current passd password", result)
+        self.assertEqual(manager.verify_passd_password.call_count, 3)
+        manager.set_passd_password.assert_not_called()
 
     def test_passd_requests_three_attempts_and_does_not_run_on_failure(self):
         manager = Mock()
