@@ -1,5 +1,6 @@
 import json
 import os
+import shlex
 import subprocess
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -52,18 +53,30 @@ class ApplicationManager:
         for mf in MANIFEST_DIR.glob("*.json"):
             try:
                 data = json.loads(mf.read_text(encoding="utf-8"))
-                status = "RUNNING" if data["app_id"] in self.active_apps else "INSTALLED"
+                active = self.active_apps.get(data["app_id"])
+                process = active.get("process") if active else None
+                if active and process and process.poll() is not None:
+                    self.active_apps.pop(data["app_id"], None)
+                    active = None
+                status = "RUNNING" if active else "INSTALLED"
                 data["status"] = status
                 apps.append(data)
-            except: pass
+            except (OSError, ValueError, KeyError, TypeError):
+                continue
         return apps
 
     def launch(self, app_id_or_name: str) -> str:
         # Match by ID or Name
         target_mf = None
         for mf in MANIFEST_DIR.glob("*.json"):
-            data = json.loads(mf.read_text(encoding="utf-8"))
-            if data["app_id"].lower() == app_id_or_name.lower() or data["name"].lower() == app_id_or_name.lower():
+            try:
+                data = json.loads(mf.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if (
+                data.get("app_id", "").lower() == app_id_or_name.lower()
+                or data.get("name", "").lower() == app_id_or_name.lower()
+            ):
                 target_mf = data
                 break
 
@@ -74,8 +87,29 @@ class ApplicationManager:
         app_sandbox = SANDBOX_DIR / target_mf["app_id"]
         app_sandbox.mkdir(parents=True, exist_ok=True)
 
-        cmd = target_mf["exec_cmd"]
-        p = subprocess.Popen(cmd, shell=True, cwd=str(ROOT_DIR), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        command = target_mf.get("exec_cmd")
+        if not isinstance(command, str) or not command.strip():
+            return f"\033[31m[APP ERR] Application '{target_mf['name']}' has no executable command.\033[0m"
+        try:
+            cmd = shlex.split(command, posix=os.name != "nt")
+            if not cmd:
+                raise ValueError("The executable command is empty.")
+            p = subprocess.Popen(cmd, cwd=str(ROOT_DIR))
+        except (OSError, ValueError) as exc:
+            return f"\033[31m[APP ERR] Could not launch '{target_mf['name']}': {exc}\033[0m"
+
+        try:
+            exit_code = p.wait(timeout=0.15)
+        except subprocess.TimeoutExpired:
+            exit_code = None
+        if exit_code is not None:
+            if exit_code:
+                return (
+                    f"\033[31m[APP ERR] '{target_mf['name']}' exited with code "
+                    f"{exit_code}. Check its runtime and launch output.\033[0m"
+                )
+            return f"\033[1;32m[APP COMPLETE]\033[0m '{target_mf['name']}' finished successfully."
+
         self.active_apps[target_mf["app_id"]] = {
             "name": target_mf["name"],
             "pid": p.pid,

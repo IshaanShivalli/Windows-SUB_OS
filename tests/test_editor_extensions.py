@@ -10,7 +10,7 @@ from unittest.mock import patch
 from prompt_toolkit.completion import CompleteEvent
 from prompt_toolkit.document import Document
 
-from apps.nano import OperatorCodeEditor, load_language_extension
+from apps.nano import OperatorCodeEditor, VynLexer, load_language_extension
 from packages import package_manager
 from shell.opshell import AtlasCompleter, OperatorShellEngine
 
@@ -65,6 +65,7 @@ class EditorLanguageExtensionTests(unittest.TestCase):
         self.assertEqual(editor.language, "Python")
         self.assertIn("print", editor.completion_words)
         self.assertIsNotNone(editor.text_buffer.completer)
+        self.assertTrue(editor.text_buffer.complete_while_typing())
 
     def test_nano_shell_command_always_uses_operator_code_editor(self):
         file_path = self.temp_path / "sample.py"
@@ -149,6 +150,7 @@ class EditorLanguageExtensionTests(unittest.TestCase):
         editor = self.create_editor()
         self.assertIsNotNone(editor.text_buffer.completer)
         self.assertTrue(editor.text_buffer.complete_while_typing())
+        self.assertTrue(editor.completion_words)
         completions = list(
             editor.text_buffer.completer.get_completions(
                 Document("pri", 3),
@@ -156,6 +158,54 @@ class EditorLanguageExtensionTests(unittest.TestCase):
             )
         )
         self.assertIn("print", [completion.text for completion in completions])
+
+    def test_python_completion_includes_user_symbols_and_contextual_builtin_members(self):
+        self.install_extension("editor.lang.python")
+        editor = self.create_editor()
+        source = "def calculate_total(amount):\n    names = []\n    names.ap"
+        function_completions = list(
+            editor.text_buffer.completer.get_completions(
+                Document("def calculate_total(amount):\n    cal", len("def calculate_total(amount):\n    cal")),
+                CompleteEvent(),
+            )
+        )
+        self.assertIn(
+            "calculate_total",
+            [completion.text for completion in function_completions],
+        )
+        completions = list(
+            editor.text_buffer.completer.get_completions(
+                Document(source, len(source)),
+                CompleteEvent(),
+            )
+        )
+        self.assertIn("append", [completion.text for completion in completions])
+
+    def test_python_editor_reports_live_syntax_diagnostics(self):
+        self.install_extension("editor.lang.python")
+        editor = self.create_editor()
+
+        editor.text_buffer.text = "def broken(:\n    pass"
+
+        self.assertIn("line 1", editor.python_diagnostic)
+        self.assertIn("Syntax error", "".join(text for _, text in editor._get_statusbar_text()[0:1]))
+
+        editor.text_buffer.text = "def valid():\n    return 42\n"
+        self.assertIsNone(editor.python_diagnostic)
+
+    def test_editor_rendering_is_configured_for_immediate_shortcut_feedback(self):
+        with patch("apps.nano.Application", return_value=None) as application:
+            editor = OperatorCodeEditor(
+                str(self.source_file),
+                working_dir=str(self.temp_path),
+                extension_db_path=self.database,
+            )
+
+        options = application.call_args.kwargs
+        self.assertEqual(options["min_redraw_interval"], 0)
+        self.assertEqual(options["max_render_postpone_time"], 0)
+        self.assertEqual(options["terminal_size_polling_interval"], 1.0)
+        self.assertFalse(editor.text_buffer.complete_while_typing())
 
     def test_inactive_or_nonmatching_extensions_do_not_enable_completions(self):
         self.install_extension("editor.lang.python", status="inactive")
@@ -192,9 +242,43 @@ class EditorLanguageExtensionTests(unittest.TestCase):
                         ).fetchone()
                     self.assertEqual(row, ("active",))
 
+    def test_vyn_extension_installs_completions_and_custom_syntax_lexer(self):
+        vyn_file = self.temp_path / "sample.vyn"
+        vyn_file.write_text('IF (ready) do\n  print("hello")\nend\n', encoding="utf-8")
+        manager = object.__new__(package_manager.PackageManager)
+        manager.history_log = []
+
+        with patch.object(package_manager, "DB_PATH", self.database):
+            result = manager.install("editor.lang.vyn")
+        self.assertIn("Installed", result)
+
+        extension = load_language_extension(str(vyn_file), self.database)
+        self.assertEqual(extension["language"], "Vyn")
+        self.assertIn("IF", extension["completions"])
+        with patch("apps.nano.PygmentsLexer", return_value="vyn-lexer") as lexer_factory:
+            editor = self.create_editor(filepath=vyn_file)
+            self.assertEqual(editor._get_lexer(), "vyn-lexer")
+            lexer_factory.assert_called_with(VynLexer)
+
+    def test_vyn_completion_includes_symbols_declared_in_the_current_buffer(self):
+        self.install_extension("editor.lang.vyn")
+        vyn_file = self.temp_path / "sample.vyn"
+        vyn_file.write_text("", encoding="utf-8")
+        editor = self.create_editor(filepath=vyn_file)
+        source = "function calculateTotal(a, b) perform\nendFunc\ncal"
+
+        completions = list(
+            editor.text_buffer.completer.get_completions(
+                Document(source, len(source)),
+                CompleteEvent(),
+            )
+        )
+
+        self.assertIn("calculateTotal", [completion.text for completion in completions])
+
     def test_available_language_manifests_are_valid_and_installable(self):
         manifests = list(PACKAGE_REPO.glob("editor.lang.*.manifest.json"))
-        self.assertGreaterEqual(len(manifests), 7)
+        self.assertGreaterEqual(len(manifests), 8)
         for manifest_path in manifests:
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             self.assertTrue(manifest["id"].startswith("editor.lang."))
@@ -213,6 +297,7 @@ class EditorLanguageExtensionTests(unittest.TestCase):
             "editor.lang.c": ((".c",), {"int", "struct"}),
             "editor.lang.powershell": ((".ps1",), {"function", "param"}),
             "editor.lang.batch": ((".bat", ".cmd"), {"echo", "if", "set"}),
+            "editor.lang.vyn": ((".vyn",), {"IF", "function", "DOF"}),
         }
         for package_id, (suffixes, expected_words) in expected.items():
             with self.subTest(package=package_id):

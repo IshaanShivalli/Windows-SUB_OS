@@ -66,6 +66,20 @@ def run_boot_component(label, command, verbose=False):
         if output:
             console.print(output)
 
+
+def _run_shell(shell_py, env):
+    process = subprocess.Popen(
+        [sys.executable, str(shell_py)],
+        cwd=ROOT_DIR,
+        env=env,
+    )
+    while True:
+        try:
+            return process.wait()
+        except KeyboardInterrupt:
+            continue
+
+
 def migrate_database(conn):
     """Bring registries created by earlier Atlas/Operator releases forward."""
     exists = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='sys_users'").fetchone()
@@ -131,16 +145,12 @@ def main(argv=None):
         log("Starting Operator Shell...")
         shell_env = os.environ.copy()
         shell_env["OPERATOR_QUIET_START"] = "1"
-        shell_result = subprocess.run(
-            [sys.executable, str(shell_py)],
-            cwd=ROOT_DIR,
-            env=shell_env,
-        )
-        if shell_result.returncode:
-            log(f"Operator Shell exited with code {shell_result.returncode}.", "red")
+        shell_returncode = _run_shell(shell_py, shell_env)
+        if shell_returncode:
+            log(f"Operator Shell exited with code {shell_returncode}.", "red")
         else:
             log("Operator Shell closed.")
-        return shell_result.returncode
+        return shell_returncode
     except Exception as exc:
         log(f"Boot failed: {exc}", "red")
         if args.verbose:

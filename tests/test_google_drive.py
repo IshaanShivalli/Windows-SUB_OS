@@ -6,12 +6,11 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from integrations.google_drive import DRIVE_SCOPE, GoogleDriveManager
-from network.net_stack import OperatorNetworkStack
+from integrations.rclone_drive import RcloneDriveManager
 from shell.opshell import OperatorShellEngine
 
 
-class GoogleDriveTests(unittest.TestCase):
+class RcloneDriveTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp_dir.cleanup)
@@ -20,136 +19,141 @@ class GoogleDriveTests(unittest.TestCase):
         self.mount.mkdir(parents=True)
         self.storage = Mock()
         self.storage.resolve_vpath.side_effect = lambda path, cwd, user: (
-            self.temp_path / "Users" / user / path.rsplit("/", 1)[-1],
+            self.temp_path / "Users" / user / "Google Drive",
             path,
         )
-        self.network = Mock()
-        self.manager = GoogleDriveManager(self.network, self.storage)
+        self.manager = RcloneDriveManager(storage=self.storage)
         self.manager._username = "operator"
         self.manager._mount_dir = self.mount
-        self.manager._token = {
-            "access_token": "test-access",
-            "refresh_token": "test-refresh",
-            "client_id": "client.apps.googleusercontent.com",
-            "scope": DRIVE_SCOPE,
-            "expires_at": time.time() + 3600,
-        }
-        self.manager._service = Mock()
+        self.manager._config_path = self.temp_path / "private" / "rclone.conf"
+        self.manager._config_path.parent.mkdir(parents=True)
+        self.manager._config_path.write_text("[gdrive]\ntype = drive\n", encoding="utf-8")
+        self.manager._remote = "gdrive"
 
-    def test_oauth_exchange_uses_operator_network_and_reports_http_errors(self):
-        self.network.http_request.return_value = {
-            "status_code": 200,
-            "body": b'{"access_token":"access","refresh_token":"refresh","expires_in":3600}',
-            "truncated": False,
-        }
-        token = self.manager._request_token({"grant_type": "authorization_code"})
-
-        self.assertEqual(token["access_token"], "access")
-        args, kwargs = self.network.http_request.call_args
-        self.assertEqual(args[:2], ("POST", "https://oauth2.googleapis.com/token"))
-        self.assertEqual(kwargs["data"], b"grant_type=authorization_code")
-
-        self.network.http_request.return_value = {
-            "status_code": 400,
-            "body": b'{"error":"invalid_grant"}',
-            "truncated": False,
-        }
-        with self.assertRaisesRegex(RuntimeError, "invalid_grant"):
-            self.manager._request_token({"grant_type": "authorization_code"})
-
-    def test_drive_download_sanitizes_filename_and_writes_into_user_mount(self):
-        files = self.manager._service.files.return_value
-        files.get.return_value.execute.return_value = {
-            "id": "file-123",
-            "name": "..\\..\\private.txt",
-            "mimeType": "text/plain",
-        }
-        files.get_media.return_value = object()
-
-        class Downloader:
-            def __init__(self, destination, request):
-                self.destination = destination
-
-            def next_chunk(self):
-                self.destination.write(b"drive contents")
-                return None, True
-
-        google_http = SimpleNamespace(MediaIoBaseDownload=Downloader)
-        google_client = SimpleNamespace(http=google_http, __path__=[])
-        with patch.dict(
-            "sys.modules",
-            {
-                "googleapiclient": google_client,
-                "googleapiclient.http": google_http,
-            },
-        ):
-            downloaded = Path(self.manager.download_file("file-123"))
-
-        self.assertEqual(downloaded.parent, self.mount)
-        downloaded.resolve().relative_to(self.mount.resolve())
-        self.assertEqual(downloaded.read_bytes(), b"drive contents")
-        self.assertEqual(self.manager._index[downloaded.name]["file_id"], "file-123")
-
-    def test_mount_prompts_for_client_id_and_mounts_the_current_user_folder(self):
-        token_path = self.temp_path / "private" / "token.json"
-        service = Mock()
-        service.files.return_value.list.return_value.execute.return_value = {"files": []}
-        credentials = object()
-        self.manager._token_path = Mock(return_value=token_path)
-        self.manager._authorize = Mock(return_value=self.manager._token.copy())
-        self.manager._create_service = Mock(return_value=(credentials, service))
+    def test_mount_uses_existing_rclone_remote_and_checks_connectivity(self):
+        self.manager._config_path_for = Mock(return_value=self.manager._config_path)
         self.manager._resolve_mount_dir = Mock(return_value=self.mount)
-
-        with patch("integrations.google_drive.input", return_value="client.apps.googleusercontent.com", create=True), patch.object(
-            self.manager, "_start_sync_worker"
+        with (
+            patch("integrations.rclone_drive.shutil.which", return_value="rclone.exe"),
+            patch.object(self.manager, "_run_rclone") as run_rclone,
+            patch.object(self.manager, "_start_sync_worker"),
         ):
+            run_rclone.side_effect = [
+                SimpleNamespace(stdout="gdrive:\n"),
+                SimpleNamespace(stdout="[]"),
+            ]
             result = self.manager.mount_interactively(username="operator")
 
-        self.assertIn("/Users/operator/Google Drive", result)
-        self.manager._authorize.assert_called_once_with("client.apps.googleusercontent.com")
-        self.assertTrue(token_path.is_file())
-        self.assertNotIn("client_secret", token_path.read_text(encoding="utf-8"))
-        self.assertTrue((self.mount / ".operator-drive-index.json").is_file())
+        self.assertIn("rclone remote 'gdrive'", result)
+        self.assertEqual(self.manager._remote, "gdrive")
+        self.assertEqual(run_rclone.call_args_list[0].args[1:], ("listremotes",))
+        self.assertEqual(run_rclone.call_args_list[1].args[1:], ("lsjson", "gdrive:"))
 
-    def test_mount_reauthorizes_tokens_with_an_old_narrow_drive_scope(self):
-        token_path = self.temp_path / "private" / "token.json"
-        token_path.parent.mkdir()
-        token_path.write_text(
-            json.dumps(
-                {
-                    **self.manager._token,
-                    "scope": "https://www.googleapis.com/auth/drive.file",
-                }
-            ),
-            encoding="utf-8",
-        )
-        service = Mock()
-        service.files.return_value.list.return_value.execute.return_value = {"files": []}
-        self.manager._token_path = Mock(return_value=token_path)
-        self.manager._authorize = Mock(return_value=self.manager._token.copy())
-        self.manager._create_service = Mock(return_value=(object(), service))
+    def test_mount_runs_rclone_setup_when_no_remote_exists(self):
+        self.manager._config_path_for = Mock(return_value=self.manager._config_path)
         self.manager._resolve_mount_dir = Mock(return_value=self.mount)
-
-        with patch("integrations.google_drive.input", return_value="client.apps.googleusercontent.com", create=True), patch.object(
-            self.manager, "_start_sync_worker"
+        with (
+            patch("integrations.rclone_drive.shutil.which", return_value="rclone.exe"),
+            patch("integrations.rclone_drive.subprocess.run") as run_process,
+            patch.object(self.manager, "_run_rclone") as run_rclone,
+            patch.object(self.manager, "_start_sync_worker"),
         ):
+            run_process.return_value = SimpleNamespace(returncode=0)
+            run_rclone.side_effect = [
+                SimpleNamespace(stdout=""),
+                SimpleNamespace(stdout="gdrive:\n"),
+                SimpleNamespace(stdout="[]"),
+            ]
             self.manager.mount_interactively(username="operator")
 
-        self.manager._authorize.assert_called_once_with("client.apps.googleusercontent.com")
+        self.assertEqual(
+            run_process.call_args.args[0][:3],
+            ["rclone.exe", "--config", str(self.manager._config_path)],
+        )
+        self.assertEqual(run_process.call_args.args[0][-1], "config")
+        self.assertIn("--config", run_process.call_args.args[0])
+        self.assertEqual(self.manager._read_remote("operator"), "gdrive")
+
+    def test_lists_remote_entries_as_drive_file_records(self):
+        self.manager._run_rclone = Mock(
+            return_value=SimpleNamespace(
+                stdout=json.dumps(
+                    [
+                        {
+                            "ID": "remote-id",
+                            "Path": "Reports/annual.pdf",
+                            "Name": "annual.pdf",
+                            "MimeType": "application/pdf",
+                            "Size": 1234,
+                            "ModTime": "2026-01-01T00:00:00Z",
+                        }
+                    ]
+                )
+            )
+        )
+
+        with patch.object(self.manager, "_find_rclone", return_value="rclone.exe"):
+            entries = self.manager.list_files("Reports", username="operator")
+
+        self.assertEqual(
+            entries,
+            [
+                {
+                    "id": "remote-id",
+                    "name": "annual.pdf",
+                    "mimeType": "application/pdf",
+                    "size": 1234,
+                    "modifiedTime": "2026-01-01T00:00:00Z",
+                }
+            ],
+        )
+        self.manager._run_rclone.assert_called_once()
+        self.assertIn("gdrive:Reports", self.manager._run_rclone.call_args.args)
+
+    def test_download_resolves_rclone_id_and_sanitizes_local_filename(self):
+        def run_rclone(executable, *arguments, config_path):
+            if arguments[0] == "lsjson":
+                return SimpleNamespace(
+                    stdout=json.dumps(
+                        [{"ID": "remote-id", "Path": "Reports/annual.pdf", "IsDir": False}]
+                    )
+                )
+            self.assertEqual(arguments[0], "copyto")
+            Path(arguments[2]).write_bytes(b"remote data")
+            return SimpleNamespace(stdout="")
+
+        self.manager._run_rclone = Mock(side_effect=run_rclone)
+
+        with patch.object(self.manager, "_find_rclone", return_value="rclone.exe"):
+            downloaded = Path(self.manager.download_file("remote-id", username="operator"))
+
+        self.assertEqual(downloaded.parent, self.mount)
+        self.assertEqual(downloaded.name, "annual.pdf")
+        self.assertEqual(downloaded.read_bytes(), b"remote data")
+        self.assertIn("annual.pdf", self.manager._index)
+
+    def test_remote_paths_reject_absolute_and_parent_traversal(self):
+        self.manager._run_rclone = Mock()
+        for invalid_path in ("/private.txt", "C:\\private.txt", "../private.txt"):
+            with self.subTest(path=invalid_path), self.assertRaises(ValueError):
+                self.manager.list_files(invalid_path, username="operator")
+        self.manager._run_rclone.assert_not_called()
 
     def test_drive_mount_commands_cannot_access_a_different_users_account(self):
         with self.assertRaisesRegex(PermissionError, "different Operator OS user"):
             self.manager.list_files(username="root")
         with self.assertRaisesRegex(PermissionError, "different Operator OS user"):
-            self.manager.download_file("file-123", username="root")
+            self.manager.download_file("remote-id", username="root")
         with self.assertRaisesRegex(PermissionError, "different Operator OS user"):
             self.manager.upload_file(self.mount / "notes.txt", username="root")
-        self.manager._service.files.assert_not_called()
 
     def test_write_unlock_hashes_local_passphrase_and_expires(self):
         policy = self.temp_path / "private" / "write.json"
         self.manager._write_policy_path = Mock(return_value=policy)
-        with patch("integrations.google_drive.getpass.getpass", side_effect=["long-local-passphrase", "long-local-passphrase"]):
+        with patch(
+            "integrations.rclone_drive.getpass.getpass",
+            side_effect=["long-local-passphrase", "long-local-passphrase"],
+        ):
             message = self.manager.setup_write_passphrase()
 
         saved = json.loads(policy.read_text(encoding="utf-8"))
@@ -157,10 +161,16 @@ class GoogleDriveTests(unittest.TestCase):
         self.assertIn("3 hours", message)
         self.assertTrue(self.manager._is_write_unlocked())
 
-        with patch("integrations.google_drive.getpass.getpass", return_value="wrong-passphrase"):
+        with patch(
+            "integrations.rclone_drive.getpass.getpass",
+            return_value="wrong-passphrase",
+        ):
             with self.assertRaisesRegex(PermissionError, "Incorrect"):
                 self.manager.unlock_writes()
-        with patch("integrations.google_drive.getpass.getpass", return_value="long-local-passphrase"):
+        with patch(
+            "integrations.rclone_drive.getpass.getpass",
+            return_value="long-local-passphrase",
+        ):
             self.manager.unlock_writes()
         self.assertTrue(self.manager._is_write_unlocked())
 
@@ -172,28 +182,21 @@ class GoogleDriveTests(unittest.TestCase):
     def test_sync_uploads_changed_files_only_after_write_unlock(self):
         new_file = self.mount / "notes.txt"
         new_file.write_text("local edit", encoding="utf-8")
-        self.manager._token = {**self.manager._token, "expires_at": time.time() + 3600}
-        google_http = SimpleNamespace(MediaFileUpload=Mock())
-        google_client = SimpleNamespace(http=google_http, __path__=[])
-        with patch.dict(
-            "sys.modules",
-            {
-                "googleapiclient": google_client,
-                "googleapiclient.http": google_http,
-            },
-        ):
+        self.manager._run_rclone = Mock(return_value=SimpleNamespace(stdout=""))
+        with patch("integrations.rclone_drive.shutil.which", return_value="rclone.exe"):
             self.manager._sync_pending_files()
-            self.manager._service.files.return_value.create.return_value.execute.return_value = {
-                "id": "remote-file"
-            }
             self.manager._write_unlock_expires = time.monotonic() + 30
             self.manager._sync_pending_files()
 
-        self.manager._service.files.return_value.create.assert_called_once()
-        self.assertEqual(self.manager._index["notes.txt"]["file_id"], "remote-file")
+        self.manager._run_rclone.assert_called_once()
+        self.assertEqual(self.manager._run_rclone.call_args.args[1:4], (
+            "copyto",
+            str(new_file),
+            "gdrive:notes.txt",
+        ))
         self.assertIn("Uploaded changed file: notes.txt", self.manager._take_messages())
 
-    def test_shell_exposes_drive_mount_and_passes_current_user(self):
+    def test_shell_exposes_rclone_mount_and_passes_current_user(self):
         shell = OperatorShellEngine.__new__(OperatorShellEngine)
         shell.variables = {"SYS.USER": "ishaan"}
         shell.google_drive = Mock()
@@ -204,26 +207,19 @@ class GoogleDriveTests(unittest.TestCase):
         self.assertEqual(result, "Mounted")
         shell.google_drive.mount_interactively.assert_called_once_with(username="ishaan")
 
-        shell.google_drive.mount_interactively.side_effect = RuntimeError("network offline")
-        self.assertIn("network offline", shell.eval_command("drive.mount"))
+        shell.google_drive.mount_interactively.side_effect = RuntimeError("rclone missing")
+        self.assertIn("rclone missing", shell.eval_command("drive.mount"))
 
-    def test_network_stack_validates_oauth_http_requests(self):
-        network = OperatorNetworkStack()
-        with self.assertRaisesRegex(ValueError, "http or https"):
-            network.http_request("POST", "file:///token")
-        with self.assertRaisesRegex(ValueError, "Credentials"):
-            network.http_request("GET", "https://user:password@example.com/")
-        with self.assertRaisesRegex(ValueError, "Unsupported HTTP method"):
-            network.http_request("TRACE", "https://example.com/")
-        with patch.object(
-            network,
-            "http_request",
-            return_value={"status_code": 403, "body": b"denied"},
-        ):
-            self.assertEqual(
-                network.http_fetch("https://example.com/"),
-                {"url": "https://example.com/", "error": "HTTP 403"},
-            )
+    def test_cancelling_drive_connection_keeps_shell_available(self):
+        shell = OperatorShellEngine.__new__(OperatorShellEngine)
+        shell.variables = {"SYS.USER": "ishaan"}
+        shell.google_drive = Mock()
+        shell.google_drive.mount_interactively.side_effect = KeyboardInterrupt
+
+        result = shell.eval_command("drive.connect")
+
+        self.assertIn("cancelled", result.lower())
+        self.assertIn("still running", result.lower())
 
 
 if __name__ == "__main__":

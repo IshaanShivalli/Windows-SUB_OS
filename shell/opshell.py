@@ -19,7 +19,7 @@ Key Features:
    - `net.resolve <host>`  -> DNS domain lookup
    - `net.probe <host>`    -> Latency probe & port ping
    - `net.fetch <url>`     -> Network HTTP socket fetcher
-   - `script.run <file>`   -> Polyglot script executor (detects .sh, .ps1, .bat, .opsh)
+   - `script.run <file>`   -> Execute a POW workflow
    - `powcurl <file>`      -> Run a Rust/C media playback script
    - `pkg.list`            -> Registry query of installed OS packages
    - `pkg.install <name>`  -> Install new package definition
@@ -51,13 +51,224 @@ if hasattr(sys.stdout, "reconfigure"):
         pass
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
+VYN_RUNTIME_DIR = Path(
+    os.environ.get(
+        "OPERATOR_VYN_HOME",
+        str(ROOT_DIR.parent.parent / "lua" / "vyn" / "vyn"),
+    )
+).expanduser()
 DB_PATH = ROOT_DIR / "db" / "operator_system.db"
 sys.path.insert(0, str(ROOT_DIR))
+
+
+def _split_shell_commands(line: str) -> list[str]:
+    commands = []
+    current = []
+    quote = None
+    index = 0
+    while index < len(line):
+        char = line[index]
+        if char == "\\":
+            next_char = line[index + 1] if index + 1 < len(line) else ""
+            if next_char in ("\\", "'", '"') or (
+                quote != "'" and next_char == ";"
+            ):
+                current.extend((char, next_char))
+                index += 2
+                continue
+        if quote:
+            if char == quote:
+                quote = None
+            current.append(char)
+        elif char in ("'", '"'):
+            quote = char
+            current.append(char)
+        elif char == ";":
+            command = "".join(current).strip()
+            if command:
+                commands.append(command)
+            current = []
+        else:
+            current.append(char)
+        index += 1
+
+    if quote:
+        raise ValueError("unterminated quoted string")
+    command = "".join(current).strip()
+    if command:
+        commands.append(command)
+    return commands
+
+
+def _parse_shell_words(command: str) -> list[str]:
+    words = []
+    current = []
+    quote = None
+    token_started = False
+    index = 0
+    while index < len(command):
+        char = command[index]
+        if char == "\\":
+            next_char = command[index + 1] if index + 1 < len(command) else ""
+            escapable = (
+                ("'" if quote == "'" else '"\' ;\\')
+                if quote != "'"
+                else "'\\"
+            )
+            if next_char and next_char in escapable:
+                current.append(next_char)
+                token_started = True
+                index += 2
+                continue
+            current.append(char)
+            token_started = True
+        elif quote:
+            if char == quote:
+                quote = None
+            else:
+                current.append(char)
+        elif char in ("'", '"'):
+            quote = char
+            token_started = True
+        elif char.isspace():
+            if token_started:
+                words.append("".join(current))
+                current = []
+                token_started = False
+        else:
+            current.append(char)
+            token_started = True
+        index += 1
+
+    if quote:
+        raise ValueError("unterminated quoted string")
+    if token_started:
+        words.append("".join(current))
+    return words
+
+
+SPECIAL_COMMAND_HELP = {
+    "app.close": ("app.close <name-or-id>", "Stop a running app launched by the manifest manager."),
+    "app.launch": ("app.launch <name-or-id>", "Launch an installed app from its manifest; app names with spaces may be quoted."),
+    "app.list": ("app.list", "List installed manifest-based applications and their current status."),
+    "auth.login": ("auth.login <username>", "Authenticate an Operator OS account."),
+    "auth.whoami": ("auth.whoami", "Show the currently authenticated account."),
+    "backup.create": ("backup.create <name>", "Create a named persistent restore point; requires root."),
+    "boot.iso": ("boot.iso [options]", "Build the configured bootable target from Operator OS components."),
+    "cron.add": ("cron.add <name> <seconds> <safe-command...>", "Schedule an allowlisted recurring action. Minimum interval is 10 seconds."),
+    "cron.list": ("cron.list", "List recurring jobs, owners, next-run times, and status."),
+    "cron.logs": ("cron.logs <name> [count]", "Read persistent output logs for a scheduled job."),
+    "cron.remove": ("cron.remove <name>", "Remove a scheduled job."),
+    "db.query": ("db.query <sql>", "Run a SQL query against the Operator system registry."),
+    "date": ("date", "Display the current local time using the Operator time service."),
+    "dev.build": ("dev.build [target]", "Run an Operator development build target."),
+    "dev.test": ("dev.test [target]", "Run Operator subsystem tests."),
+    "dev.trace": ("dev.trace [options]", "Inspect syscall and subsystem execution traces."),
+    "drive.download": ("drive.download <file-id-or-path>", "Download a Drive file into the current user's mounted Drive folder."),
+    "drive.connect": ("drive.connect", "Configure or connect Google Drive through rclone."),
+    "drive.ls": ("drive.ls [remote-path]", "List files from the mounted Google Drive account."),
+    "drive.mount": ("drive.mount", "Configure or connect a Google Drive remote with rclone."),
+    "drive.status": ("drive.status", "Show current Drive mount and authentication status."),
+    "drive.upload": ("drive.upload <path>", "Upload a file while Drive writes are unlocked."),
+    "drive.write.setup": ("drive.write.setup", "Set a local passphrase protecting Drive uploads."),
+    "drive.write.unlock": ("drive.write.unlock", "Unlock Drive uploads for the current time-limited session."),
+    "fs.copy": ("fs.copy <source> <destination>", "Copy files through the mounted virtual filesystem."),
+    "fs.delete": ("fs.delete <path>", "Remove a file or directory through the virtual filesystem."),
+    "fs.goto": ("fs.goto <path>", "Navigate to a mounted virtual filesystem location."),
+    "fs.list": ("fs.list <path>", "List a mounted virtual filesystem directory."),
+    "fs.mount": ("fs.mount <host-path> <vfs-path>", "Mount a host directory into Operator's virtual filesystem."),
+    "fs.move": ("fs.move <source> <destination>", "Move files through the mounted virtual filesystem."),
+    "fs.remove": ("fs.remove <path>", "Remove a file or directory through the virtual filesystem."),
+    "fs.vlist": ("fs.vlist <path>", "List a mounted virtual filesystem directory."),
+    "games.list": ("games.list", "List installed game executables under the active user's Games directory."),
+    "games.launch": ("games.launch <name> [args...]", "Launch an installed game with its LÖVE runtime and request the Windows high-performance GPU."),
+    "game.launch": ("game.launch <name> [args...]", "Alias for games.launch."),
+    "get-date": ("get-date", "Display the current local time using the Operator time service."),
+    "gpu.active": ("gpu.active", "Report whether a GPU compute backend is available."),
+    "gpu.ai": ("gpu.ai", "Show the selected GPU/CPU acceleration backend."),
+    "gpu.compute": ("gpu.compute", "Probe whether GPU compute is available."),
+    "gpu.probe": ("gpu.probe", "Show detected GPU hardware, driver details, and status."),
+    "help": ("help [command|menu]", "Show command categories, a specific feature's help, or the complete feature help menu."),
+    "log.clear": ("log.clear", "Clear the Operator OS central log."),
+    "log.show": ("log.show [count]", "Display recent Operator OS central log entries."),
+    "mem": ("mem", "Show live host RAM and swap usage."),
+    "mem.user": ("mem.user [name]", "Inspect an account's allocated memory pool and virtual pages."),
+    "nano": ("nano [file]", "Open the Operator code editor; installed language packs suggest completions while typing."),
+    "net.fetch": ("net.fetch <url>", "Fetch an HTTP resource through the Operator networking layer."),
+    "net.ifconfig": ("net.ifconfig", "List network adapters and assigned addresses."),
+    "net.probe": ("net.probe <host> [port]", "Probe host reachability and TCP latency."),
+    "net.resolve": ("net.resolve <host>", "Resolve a hostname through the Operator networking layer."),
+    "net.routes": ("net.routes", "Display the host-assisted network routing table."),
+    "net.speed": ("net.speed", "Continuously measure download, upload, and average network speed; press Ctrl+C to stop."),
+    "office": ("office", "Open the graphical Operator Office file manager and document launcher."),
+    "office.writer": ("office.writer [file]", "Open the graphical Writer and optionally load a document."),
+    "office.sheet": ("office.sheet [file.opsheet]", "Open the graphical database spreadsheet and optionally load a workbook."),
+    "office.slides": ("office.slides [file.opsdeck]", "Open the graphical presentation editor and optionally load a deck."),
+    "passd": ("passd <command...>", "Authenticate as root and run one privileged Operator command."),
+    "passd.setup": ("passd.setup", "Create or change the separate passd password; changes require the current password."),
+    "python.check": ("python.check <file.py>", "Compile-check a Python source file without executing it."),
+    "python.run": ("python.run <file.py> [args...]", "Run a Python source file with the active host Python interpreter."),
+    "pkg.avail": ("pkg.avail", "List packages available in the local Operator package repository."),
+    "pkg.install": ("pkg.install <package-id>", "Install a package definition from the local repository."),
+    "pkg.list": ("pkg.list", "List installed Operator packages."),
+    "pkg.rollback": ("pkg.rollback <package-id>", "Roll back the most recent package change when a previous version exists."),
+    "pkg.uninstall": ("pkg.uninstall <package-id>", "Uninstall an Operator package."),
+    "pow": ("pow <workflow.pow>", "Execute a POW automation workflow."),
+    "pow.exec": ("pow.exec <workflow.pow>", "Execute a POW automation workflow."),
+    "powcurl": ("powcurl <script.powcurl>", "Run a Rust/C media script through the built powcurl runtime."),
+    "proc.info": ("proc.info <pid>", "Inspect a managed process."),
+    "proc.kill": ("proc.kill <pid>", "Terminate a process; system processes require root."),
+    "proc.list": ("proc.list", "List active processes managed or observed by Operator OS."),
+    "proc.start": ("proc.start <name> <command...>", "Start a managed subsystem process."),
+    "proc.stop": ("proc.stop <pid>", "Stop a managed process."),
+    "proc.top": ("proc.top", "Show the current process resource summary."),
+    "rel.health": ("rel.health", "Inspect reliability and recovery health status."),
+    "rel.restore": ("rel.restore <name>", "Restore an available named Operator restore point."),
+    "script.run": ("script.run <workflow.pow>", "Execute a POW workflow file."),
+    "sec.firewall": ("sec.firewall [options]", "Inspect or configure the Operator security firewall."),
+    "service.list": ("service.list", "List registered settings-backed service records."),
+    "service.start": ("service.start <name>", "Start a settings-backed service record."),
+    "service.stop": ("service.stop <name>", "Stop a settings-backed service record."),
+    "settings.list": ("settings.list [category]", "List central Operator system settings."),
+    "settings.set": ("settings.set <key> <value> [category]", "Save an Operator system setting."),
+    "ssh": ("ssh <user@host> [command...]", "Connect through the host OpenSSH client."),
+    "ssh.key.add": ("ssh.key.add <user> <public-key-file>", "Enroll an Ed25519 public key for an existing Operator account."),
+    "ssh.key.list": ("ssh.key.list [user]", "List enrolled Atlas SSH key fingerprints."),
+    "ssh.key.remove": ("ssh.key.remove <user> <fingerprint>", "Revoke an enrolled Atlas SSH key."),
+    "ssh.server": ("ssh.server <start|status|stop> [options]", "Control the isolated Atlas SSH server; it listens on loopback by default."),
+    "srv.list": ("srv.list", "Show managed service state, health, PID, restart count, policy, and description."),
+    "srv.logs": ("srv.logs <name> [count]", "Read persistent output logs for a managed service."),
+    "srv.register": ("srv.register <name> [options] -- <executable> [args...]", "Register and automatically start a native process service; restart policy defaults to always."),
+    "srv.remove": ("srv.remove <name>", "Remove a stopped managed service definition."),
+    "srv.restart": ("srv.restart <name>", "Restart a managed service."),
+    "srv.start": ("srv.start <name>", "Start and supervise a registered service; service control requires root."),
+    "srv.stop": ("srv.stop <name>", "Stop a running registered service; service control requires root."),
+    "storage.cleanup": ("storage.cleanup [age-days]", "Clean old files from temporary storage; shared cleanup requires root."),
+    "storage.inspect": ("storage.inspect", "Inspect the virtual block device, filesystem, capacity, and allocation."),
+    "sys.probe": ("sys.probe", "Show combined kernel, CPU, memory, GPU, storage, and scheduler telemetry."),
+    "system.health": ("system.health", "Run live subsystem health checks."),
+    "time": ("time", "Display the local clock corrected by the latest successful NTP sample, if available."),
+    "time.service": ("time.service [status|start|sync [ntp-server]]", "Run the background read-only NTP synchronization service and inspect its status. It never changes the Windows system clock."),
+    "vyn.run": ("vyn.run <file.vyn>", "Run a Vyn script using the configured Vyn interpreter."),
+    "user.create": ("user.create <name> <password>", "Create an isolated Operator account and its storage hierarchy."),
+    "user.delete": ("user.delete <name>", "Delete an Operator account and reclaim its private storage."),
+    "user.list": ("user.list", "List Operator accounts."),
+    "user.login": ("user.login <name> <password>", "Authenticate and switch to an Operator account."),
+    "user.memory": ("user.memory [name]", "Inspect an account's allocated memory pool and virtual pages."),
+    "user.switch": ("user.switch <name>", "Switch the active Operator account."),
+    "user.whoami": ("user.whoami", "Display the active Operator account and role."),
+    "var.get": ("var.get <name>", "Read a shell environment variable."),
+    "var.set": ("var.set <name>=<value>", "Set a shell environment variable."),
+    "win.clip": ("win.clip [text...]", "Read or write the Windows host clipboard."),
+    "win.exec": ("win.exec <app>", "Launch a supported Windows host application."),
+    "win.notify": ("win.notify <title> <message>", "Show a Windows host notification."),
+}
+
 
 from storage.storage_manager import OperatorStorageManager
 from network.net_stack import OperatorNetworkStack
 from network.ssh_service import OperatorSSHService
-from integrations.google_drive import GoogleDriveManager
+from integrations.rclone_drive import RcloneDriveManager
 from core.process.process_manager import RealProcessManager
 from core.process.subsystem_proc_mgr import SubsystemProcessManager
 from core.security.security_manager import SecurityManager
@@ -65,7 +276,9 @@ from packages.package_manager import PackageManager
 from storage.vfs.vfs_engine import VirtualFileSystem
 from storage.vfs.host_fs_bridge import HostFilesystemBridge
 from core.process.app_manager import ApplicationManager
+from core.process.game_manager import GameManager
 from core.services.service_manager import ServiceManager
+from core.services.time_service import TimeService
 from core.settings.settings_service import SystemSettingsService
 from core.windows.win_integration import WindowsIntegrationLayer
 from core.logger.central_logger import CentralLogger
@@ -77,10 +290,13 @@ from core.gpu.gpu_manager import GPUManager
 from apps.nano import OperatorCodeEditor
 from core.security.user_manager import UserManager
 from core.memory.user_memory_manager import UserMemoryManager
+from network.speed_test import NetworkSpeedTester
+from core.office_suite import OfficeSuite
 
 from rich.console import Console
 from rich.table import Table
 from rich.panel import Panel
+from rich.live import Live
 from rich.text import Text
 from rich.box import ROUNDED
 from prompt_toolkit import PromptSession
@@ -176,7 +392,7 @@ class OperatorShellEngine:
     def __init__(self):
         self.storage = OperatorStorageManager()
         self.network = OperatorNetworkStack()
-        self.google_drive = GoogleDriveManager(self.network, self.storage)
+        self.google_drive = RcloneDriveManager(self.network, self.storage)
         self.proc_mgr = RealProcessManager()
         self.sub_proc_mgr = SubsystemProcessManager()
         self.security = SecurityManager()
@@ -184,7 +400,8 @@ class OperatorShellEngine:
         self.vfs = VirtualFileSystem()
         self.host_bridge = HostFilesystemBridge()
         self.app_mgr = ApplicationManager()
-        self.services = ServiceManager()
+        self.services = None
+        self.service_runtime_error = None
         self.settings_svc = SystemSettingsService()
         self.win = WindowsIntegrationLayer()
         self.logger = CentralLogger()
@@ -192,9 +409,13 @@ class OperatorShellEngine:
         self.devtools = DeveloperTools()
         self.boot_builder = BootableTargetBuilder()
         self.gpu = GPUManager()
+        self.game_mgr = GameManager(self.gpu)
         self.pow = PowEngine(ROOT_DIR, operator_runner=self.eval_command)
         self.user_mgr = UserManager()
         self.mem_mgr = UserMemoryManager()
+        self.office_suite = OfficeSuite(self.storage.resolve_vpath)
+        self.time_service = TimeService()
+        self.time_service.start()
         self._passd_auth_cache = {}
         self.ssh_service = OperatorSSHService(self.storage, self.user_mgr, self._make_remote_shell)
 
@@ -206,6 +427,13 @@ class OperatorShellEngine:
             "SYS.USER": active_u,
             "SYS.CWD": f"/Users/{active_u}/home",
         }
+        try:
+            self.services = ServiceManager(
+                storage=self.storage,
+                job_runner=self._run_scheduled_job,
+            )
+        except (AttributeError, OSError, RuntimeError) as exc:
+            self.service_runtime_error = str(exc)
         self.init_db()
         try:
             self.completer = AtlasCompleter(self.get_command_list(), lambda: self.variables["SYS.CWD"], self.storage)
@@ -227,10 +455,12 @@ class OperatorShellEngine:
 
     def get_command_list(self):
         return [
-            "help", "nano", "edit", "pico", "sys.probe", "storage.inspect", "proc.list", "proc.top",
+            "help", "nano", "edit", "pico", "sys.probe", "storage.inspect", "storage.cleanup",
+            "backup.create", "proc.list", "proc.top",
             "proc.start", "proc.stop", "proc.kill", "proc.info", "net.ifconfig", "net.routes",
-            "net.resolve", "net.probe", "net.fetch", "drive.mount", "drive.ls", "drive.upload", "drive.download",
+            "net.resolve", "net.probe", "net.fetch", "net.speed", "drive.mount", "drive.ls", "drive.upload", "drive.download",
             "ssh", "ssh.server", "ssh.key.add", "ssh.key.list", "ssh.key.remove",
+            "cron.add", "cron.list", "cron.remove", "cron.logs",
             "drive.status", "drive.connect", "drive.write.setup", "drive.write.unlock", "auth.login",
             "auth.whoami", "sec.firewall", "pkg.list", "pkg.avail", "pkg.install", "pkg.uninstall",
             "pkg.rollback", "fs.mount", "fs.list", "fs.vlist", "fs.copy", "fs.move", "fs.delete",
@@ -238,6 +468,9 @@ class OperatorShellEngine:
             "service.start", "service.stop", "settings.list", "settings.set", "win.clip", "win.notify",
             "win.exec", "log.show", "log.clear", "system.health", "srv.list", "srv.start", "srv.stop",
             "srv.logs", "rel.restore", "rel.health", "dev.test", "dev.trace", "dev.build", "boot.iso",
+            "srv.register", "srv.remove", "srv.restart", "time", "time.service", "games.list",
+            "games.launch", "game.launch", "vyn.run", "python.run", "python.check",
+            "office", "office.writer", "office.sheet", "office.slides",
             "pow", "pow.exec", "gpu.probe", "gpu.compute", "gpu.active", "gpu.ai", "db.query", "var.set", "var.get", "cd", "ls",
             "pwd", "cat", "touch", "grep", "head", "tail", "find", "du", "stat", "file", "basename", "dirname", "realpath", "sort", "uniq", "cut", "tr", "echo", "true", "false", "which", "ll", "la", "env", "printenv", "hostname", "id", "df", "free", "mem", "uname", "uptime", "wc", "mkdir", "rm", "del",
             "user.list", "user.create", "user.delete", "user.login", "user.switch", "user.whoami",
@@ -264,6 +497,145 @@ class OperatorShellEngine:
         remote_shell._passd_auth_cache = {}
         return remote_shell
 
+    def _validate_scheduled_command(self, command, username, allow_script=True):
+        try:
+            words = shlex.split(command)
+        except ValueError as exc:
+            return f"Invalid scheduled command syntax: {exc}"
+        if not words:
+            return "Scheduled command cannot be empty."
+        operation = words[0].lower()
+        if operation == "backup.create":
+            if username != "root":
+                return "Creating system restore points requires superuser privileges."
+            if len(words) != 2 or not words[1].replace("-", "").replace("_", "").isalnum():
+                return "backup.create requires a simple backup name."
+            return None
+        if operation == "storage.cleanup":
+            if username != "root":
+                return "Cleaning shared temporary storage requires superuser privileges."
+            if len(words) > 2:
+                return "storage.cleanup accepts optional age in days."
+            if len(words) == 2:
+                try:
+                    age_days = int(words[1])
+                except ValueError:
+                    return "storage.cleanup age must be an integer number of days."
+                if not 1 <= age_days <= 3650:
+                    return "storage.cleanup age must be between 1 and 3650 days."
+            return None
+        if operation == "echo":
+            return None
+        if operation == "script.run" and allow_script:
+            if len(words) != 2 or Path(words[1]).suffix.lower() != ".opsh":
+                return "Scheduled scripts must be one .opsh file."
+            owner_shell = self._make_remote_shell(username)
+            cwd = owner_shell.variables["SYS.CWD"]
+            script_path, _ = self.storage.resolve_vpath(words[1], cwd, username)
+            if not script_path.is_file():
+                return f"Scheduled script not found: {words[1]}"
+            home_path, home_vpath = self.storage.resolve_vpath(
+                f"/Users/{username}/home",
+                "/",
+                username,
+            )
+            script_vpath = self.storage.resolve_vpath(words[1], cwd, username)[1]
+            if script_vpath != home_vpath and not script_vpath.startswith(home_vpath + "/"):
+                return "Scheduled scripts must be stored in the owner's virtual home directory."
+            try:
+                script_path.resolve().relative_to(home_path.resolve())
+            except ValueError:
+                return "Scheduled scripts must be stored in the owner's virtual home directory."
+            for line_number, line in enumerate(
+                script_path.read_text(encoding="utf-8").splitlines(), 1
+            ):
+                stripped = line.strip()
+                if not stripped or stripped.startswith("#"):
+                    continue
+                error = self._validate_scheduled_command(stripped, username, allow_script=False)
+                if error:
+                    return f"Unsafe command on scheduled script line {line_number}: {error}"
+            return None
+        return (
+            "Scheduled commands are restricted to backup.create, storage.cleanup, echo, "
+            "or validated .opsh scripts."
+        )
+
+    def _cleanup_temporary_storage(self, age_days=7):
+        if not 1 <= age_days <= 3650:
+            return "[CLEANUP ERROR] Age must be between 1 and 3650 days."
+        temp_root = (self.storage.get_os_root() / "tmp").resolve()
+        if not temp_root.is_dir():
+            return "[CLEANUP] Temporary storage is already empty."
+        cutoff = time.time() - age_days * 86400
+        removed_files = 0
+        for path in temp_root.rglob("*"):
+            if path.is_symlink():
+                continue
+            if not path.is_file():
+                continue
+            if path.stat().st_mtime < cutoff:
+                path.unlink()
+                removed_files += 1
+        for path in sorted(temp_root.rglob("*"), key=lambda item: len(item.parts), reverse=True):
+            if path.is_dir() and not path.is_symlink():
+                try:
+                    path.rmdir()
+                except OSError:
+                    pass
+        return f"[CLEANUP COMPLETE] Removed {removed_files} temporary file(s) older than {age_days} day(s)."
+
+    def _run_scheduled_job(self, name, owner, command):
+        if self.user_mgr.get_user(owner) is None:
+            return f"[SCHEDULED JOB REJECTED] Owner Atlas account '{owner}' no longer exists."
+        error = self._validate_scheduled_command(command, owner)
+        if error:
+            return f"[SCHEDULED JOB REJECTED] {error}"
+        owner_shell = self._make_remote_shell(owner)
+        return owner_shell._execute_scheduled_command(command, name)
+
+    def _execute_scheduled_command(self, command, job_name):
+        words = shlex.split(command)
+        operation = words[0].lower()
+        if operation == "backup.create":
+            return self.reliability.create_restore_point(words[1])
+        if operation == "storage.cleanup":
+            age_days = int(words[1]) if len(words) > 1 else 7
+            return self._cleanup_temporary_storage(age_days)
+        if operation == "echo":
+            return " ".join(words[1:])
+        if operation == "script.run":
+            script_path, _ = self.storage.resolve_vpath(
+                words[1],
+                self.variables["SYS.CWD"],
+                self.variables["SYS.USER"],
+            )
+            outputs = []
+            for line in script_path.read_text(encoding="utf-8").splitlines():
+                stripped = line.strip()
+                if not stripped or stripped.startswith("#"):
+                    continue
+                error = self._validate_scheduled_command(
+                    stripped,
+                    self.variables["SYS.USER"],
+                    allow_script=False,
+                )
+                if error:
+                    return f"[SCHEDULED JOB REJECTED] Unsafe script command: {error}"
+                outputs.append(self._execute_scheduled_command(stripped, job_name) or "")
+            return "\n".join(output for output in outputs if output)
+        return f"[SCHEDULED JOB ERROR] Unsupported operation for '{job_name}'."
+
+    def close(self):
+        if self.time_service is not None:
+            self.time_service.close()
+            self.time_service = None
+        if self.services is not None:
+            self.services.close()
+            self.services = None
+        if self.ssh_service is not None:
+            self.ssh_service.stop()
+
     def get_prompt_text(self):
         user = self.variables.get("SYS.USER", "operator")
         vpath = self.variables.get("SYS.CWD", f"/Users/{user}/home")
@@ -282,6 +654,7 @@ class OperatorShellEngine:
     def execute_script_file(self, script_path_str: str, args: list = None):
         """
         Executes external shell script files according to their file type and engine:
+        - .py         -> Python
         - .sh, .bash  -> Linux / WSL
         - .ps1        -> PowerShell
         - .bat, .cmd  -> Windows CMD
@@ -303,7 +676,17 @@ class OperatorShellEngine:
         print(f"\033[1;33m[SCRIPT LOADER]\033[0m Executing '{script_path.name}' via {ext.upper()} target runtime...")
 
         try:
-            if ext in (".sh", ".bash"):
+            if ext == ".py":
+                res = subprocess.run(
+                    [sys.executable, abs_str, *args],
+                    cwd=str(script_path.parent),
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                )
+                return (res.stdout + res.stderr).strip()
+
+            elif ext in (".sh", ".bash"):
                 # Run with WSL / bash
                 wsl_path = abs_str.replace("\\", "/")
                 if ":" in wsl_path:
@@ -371,19 +754,74 @@ class OperatorShellEngine:
                 return "\n".join(outputs)
 
             else:
-                return f"\033[31m[Script Error]: Unsupported script file extension '{ext}'. (Supports .sh, .bash, .ps1, .bat, .cmd, .java, .c, .opsh)\033[0m"
+                return f"\033[31m[Script Error]: Unsupported script file extension '{ext}'. (Supports .py, .sh, .bash, .ps1, .bat, .cmd, .java, .c, .opsh)\033[0m"
 
         except Exception as e:
             return f"\033[31m[Script Runtime Exception]: {str(e)}\033[0m"
 
-    def format_help(self):
+    def format_help(self, topic=None):
         buf = io.StringIO()
         c = Console(file=buf, force_terminal=True, width=95)
+        if topic:
+            command = topic.casefold()
+            aliases = {
+                "free": "mem",
+                "get-date": "time",
+                "date": "time",
+                "editor": "nano",
+                "pico": "nano",
+                "games": "games.list",
+            }
+            command = aliases.get(command, command)
+            if command == "menu":
+                title = Text("OPERATOR FEATURE COMMAND HELP MENU", style="bold cyan")
+                c.print(Panel(title, border_style="cyan", box=ROUNDED))
+                table = Table(box=ROUNDED, border_style="cyan", expand=True)
+                table.add_column("Command", style="bold cyan", width=34)
+                table.add_column("Usage", style="green", width=46)
+                table.add_column("Feature", style="white")
+                for name, (usage, description) in sorted(SPECIAL_COMMAND_HELP.items()):
+                    table.add_row(name, usage, description)
+                c.print(table)
+                return buf.getvalue().rstrip()
+
+            if command in SPECIAL_COMMAND_HELP:
+                usage, description = SPECIAL_COMMAND_HELP[command]
+                title = Text(f"COMMAND HELP: {command}", style="bold cyan")
+                c.print(Panel(title, border_style="cyan", box=ROUNDED))
+                c.print(f"[bold green]Usage:[/bold green] {usage}")
+                c.print(f"[bold white]Feature:[/bold white] {description}")
+                c.print("\nUse [bold cyan]help menu[/bold cyan] to browse all feature-specific command help.")
+                return buf.getvalue().rstrip()
+
+            related = [
+                (name, details)
+                for name, details in SPECIAL_COMMAND_HELP.items()
+                if name.startswith(command + ".")
+            ]
+            if related:
+                title = Text(f"COMMAND HELP: {command}", style="bold cyan")
+                c.print(Panel(title, border_style="cyan", box=ROUNDED))
+                table = Table(box=ROUNDED, border_style="cyan", expand=True)
+                table.add_column("Command", style="bold cyan")
+                table.add_column("Usage", style="green")
+                table.add_column("Feature", style="white")
+                for name, (usage, description) in sorted(related):
+                    table.add_row(name, usage, description)
+                c.print(table)
+                return buf.getvalue().rstrip()
+            return (
+                f"[HELP] No feature-specific help is registered for '{topic}'. "
+                "Use 'help menu' to browse the available command help."
+            )
+
         title = Text("ATLAS OS SUBSYSTEM COMMAND REFERENCE (v2.0-PRO)", style="bold cyan")
         c.print(Panel(title, border_style="cyan", box=ROUNDED))
+        c.print("[dim]Use 'help <command>' for command details or 'help menu' for every feature command.[/dim]")
 
         categories = [
             ("Core System & Diagnostics", "cyan", [
+                ("time / time.service", "Local clock and background NTP sync status"),
                 ("sys.probe", "Comprehensive kernel, CPU, scheduler & storage telemetry"),
                 ("mem / free", "Show live physical RAM and swap usage"),
                 ("gpu.probe", "Show detected GPU hardware and host driver status"),
@@ -394,8 +832,15 @@ class OperatorShellEngine:
             ]),
             ("Inbuilt Editor & Development", "green", [
                 ("nano [file]", "Open Operator's code editor"),
-                ("pkg.install editor.lang.<language>", "Install editor autocomplete for a language"),
-                ("script.run <file>", "Polyglot script executor (.sh, .ps1, .bat, .opsh)"),
+                ("python.run <file.py> [args...]", "Run Python source with the host Python interpreter"),
+                ("python.check <file.py>", "Compile-check Python syntax without executing the file"),
+                ("office / office.writer / office.sheet / office.slides", "Open the graphical office suite, editors, and database spreadsheets"),
+                ("app.launch <app>", "Launch a manifest-based app"),
+                ("games.list", "List installed games"),
+                ("games.launch <name> [args...]", "Launch an installed game using its LÖVE runtime and Windows high-performance GPU preference"),
+                ("vyn.run <file.vyn>", "Run a Vyn source file with the configured Vyn interpreter"),
+                ("pkg.install editor.lang.python / editor.lang.vyn", "Enable language highlighting and contextual completion in nano"),
+                ("script.run <file>", "Execute a POW workflow"),
                 ("powcurl <file.powcurl>", "Run a Rust/C media playback script"),
                 ("dev.test / dev.trace", "Subsystem developer tools and syscall tracing"),
             ]),
@@ -407,6 +852,8 @@ class OperatorShellEngine:
             ]),
             ("Storage & Filesystem (2GB Block DEV)", "yellow", [
                 ("storage.inspect", "Inspect 2GB raw block storage device & partition mapping"),
+                ("backup.create <name>", "Create a persistent system restore point"),
+                ("storage.cleanup [days]", "Remove old files from temporary storage"),
                 ("fs.list / dir [path]", "List virtual & host directory objects with telemetry"),
                 ("fs.mount <host> <vfs>", "Mount host Windows filesystem into VFS namespace"),
                 ("cp / copy [-r] <src> <dst>", "Copy files and directories inside virtual storage"),
@@ -434,18 +881,27 @@ class OperatorShellEngine:
                 ("net.resolve <host>", "Query host DNS resolution"),
                 ("net.probe <host> [port]", "Measure TCP port latency and ping host"),
                 ("net.fetch <url>", "HTTP socket fetcher and previewer"),
+                ("net.speed", "Live download/upload speed test; press Ctrl+C to stop"),
                 ("ssh <user@host> [command]", "Connect with the host OpenSSH client"),
                 ("ssh.server start|status|stop", "Manage the key-authenticated Atlas-only SSH server"),
                 ("ssh.key.add <user> <public-key-file>", "Authorize an Ed25519 key for an Atlas account"),
                 ("ssh.key.list [user]", "List fingerprints of authorized Atlas SSH keys"),
                 ("ssh.key.remove <user> <fingerprint>", "Revoke an authorized Atlas SSH key"),
                 ("drive.mount / drive.status", "Connect and inspect your per-user Google Drive mount"),
-                ("drive.ls [folder-id]", "List files in the mounted Google Drive account"),
-                ("drive.download <file-id>", "Download a Drive file into the current user's Drive folder"),
+                ("drive.ls [remote-path]", "List files in the mounted Google Drive account"),
+                ("drive.download <file-id-or-path>", "Download a Drive file into the current user's Drive folder"),
                 ("drive.upload <path>", "Upload a local Drive mount file after unlocking writes"),
                 ("drive.write.setup / drive.write.unlock", "Protect automatic uploads with a local passphrase"),
                 ("netstat", "Display active network connections and listening ports"),
                 ("ping / test-connection", "Host ping diagnostics"),
+            ]),
+            ("Scheduled Jobs & Services", "bright_magenta", [
+                ("cron.add <name> <seconds> <command...>", "Schedule backups, temp cleanup, or a safe .opsh script"),
+                ("cron.list / cron.remove <name>", "List or remove persistent scheduled jobs"),
+                ("cron.logs <name> [count]", "Read persistent scheduled-job output"),
+                ("srv.register <name> --restart <policy> --health <check> -- <exe> [args...]", "Register a native managed process"),
+                ("srv.start / srv.stop / srv.restart <name>", "Supervise or stop a real native process"),
+                ("srv.list / srv.logs <name> [count]", "Inspect process health, PID, restart count, and persistent logs"),
             ]),
             ("Linux / POSIX Utilities", "bright_cyan", [
                 ("ls / ll / la", "POSIX directory listing with flags (-l, -a, -lh)"),
@@ -492,6 +948,91 @@ class OperatorShellEngine:
 
         return buf.getvalue().rstrip()
 
+    def run_network_speed_test(self):
+        native_speed_binary = ROOT_DIR / "bin" / "net_speed.exe"
+        if native_speed_binary.exists():
+            try:
+                subprocess.run([str(native_speed_binary)], check=False)
+                return "[C++ SPEED TEST] Native Atlas net-speed monitor exited."
+            except KeyboardInterrupt:
+                return "[SPEED TEST STOPPED] Native speed monitor interrupted by Ctrl+C."
+
+        tester = NetworkSpeedTester(self.network)
+        totals = {
+            "download": {"bytes": 0, "seconds": 0.0, "latest": None},
+            "upload": {"bytes": 0, "seconds": 0.0, "latest": None},
+        }
+        errors = {}
+        samples = 0
+        started = time.monotonic()
+
+        def average_mbps(direction):
+            total = totals[direction]
+            if not total["seconds"]:
+                return "N/A"
+            return f"{total['bytes'] * 8 / total['seconds'] / 1_000_000:.2f} Mbps"
+
+        def render(status):
+            table = Table(box=ROUNDED, border_style="cyan", expand=True)
+            table.add_column("Direction", style="bold cyan")
+            table.add_column("Current", style="bold green")
+            table.add_column("Average", style="bold yellow")
+            table.add_column("Sample")
+            for direction, title in (("download", "Download"), ("upload", "Upload")):
+                latest = totals[direction]["latest"]
+                current = f"{latest['mbps']:.2f} Mbps" if latest else "-"
+                size = f"{latest['bytes'] / 1_000_000:.2f} MB" if latest else "-"
+                table.add_row(title, current, average_mbps(direction), size)
+            detail = status
+            if errors:
+                detail += " | " + " | ".join(
+                    f"{direction.title()} error: {message}"
+                    for direction, message in errors.items()
+                )
+            return Panel(
+                table,
+                title="OPERATOR NETWORK SPEED TEST",
+                subtitle=f"{detail} | Samples: {samples} | Ctrl+C to stop",
+                border_style="bright_blue",
+            )
+
+        try:
+            with Live(
+                render("Connecting to Cloudflare speed-test service..."),
+                console=Console(),
+                refresh_per_second=4,
+                transient=True,
+            ) as live:
+                while True:
+                    live.update(render("Measuring"))
+                    successful_directions = 0
+                    for direction, measure in (
+                        ("download", tester.measure_download),
+                        ("upload", tester.measure_upload),
+                    ):
+                        try:
+                            measurement = measure()
+                        except Exception as exc:
+                            errors[direction] = str(exc)
+                            continue
+                        totals[direction]["bytes"] += measurement["bytes"]
+                        totals[direction]["seconds"] += measurement["seconds"]
+                        totals[direction]["latest"] = measurement
+                        errors.pop(direction, None)
+                        successful_directions += 1
+                    if successful_directions:
+                        samples += 1
+                    live.update(render("Running"))
+                    time.sleep(1)
+        except KeyboardInterrupt:
+            elapsed = time.monotonic() - started
+            return (
+                f"[SPEED TEST STOPPED] Duration: {elapsed:.1f}s | "
+                f"Download average: {average_mbps('download')} | "
+                f"Upload average: {average_mbps('upload')} | "
+                f"Completed samples: {samples}"
+            )
+
     def format_sys_probe(self):
         buf = io.StringIO()
         c = Console(file=buf, force_terminal=True, width=95)
@@ -525,7 +1066,7 @@ class OperatorShellEngine:
             total_gb = memory["total_bytes"] / (1024 ** 3)
             available_gb = memory["available_bytes"] / (1024 ** 3)
             t.add_row("Host Physical RAM", f"{total_gb:.2f} GB total, {available_gb:.2f} GB available")
-        except OSError as exc:
+        except (OSError, UnicodeError) as exc:
             t.add_row("Host Physical RAM", f"Telemetry unavailable: {exc}")
         c.print(t)
         return buf.getvalue().rstrip()
@@ -819,16 +1360,53 @@ class OperatorShellEngine:
                 print("Incorrect passd password.")
         return False
 
+    def _ensure_runtime_state(self):
+        if not hasattr(self, "variables") or self.variables is None:
+            active_user = getattr(self, "active_user", "operator")
+            self.variables = {
+                "SYS.OS": "Atlas OS",
+                "SYS.VER": "2.0.0-PRO",
+                "SYS.ARCH": "x86_64-subsystem",
+                "SYS.USER": active_user,
+                "SYS.CWD": f"/Users/{active_user}/home",
+            }
+        else:
+            self.variables.setdefault("SYS.OS", "Atlas OS")
+            self.variables.setdefault("SYS.VER", "2.0.0-PRO")
+            self.variables.setdefault("SYS.ARCH", "x86_64-subsystem")
+            self.variables.setdefault("SYS.USER", getattr(self, "active_user", "operator"))
+            self.variables.setdefault("SYS.CWD", f"/Users/{self.variables['SYS.USER']}/home")
+
     def eval_command(self, raw_line: str):
-        line = raw_line.strip()
-        if not line or line.startswith("#"):
+        self._ensure_runtime_state()
+        try:
+            commands = _split_shell_commands(raw_line)
+        except ValueError as exc:
+            return f"\033[31m[SYNTAX ERROR] {exc}\033[0m"
+        if not commands:
+            return None
+        if len(commands) > 1:
+            outputs = []
+            for command in commands:
+                output = self.eval_command(command)
+                if output:
+                    outputs.append(str(output))
+            return "\n".join(outputs) or None
+
+        line = commands[0]
+        if line.startswith("#"):
             return None
 
         # Interpolate variables: @(VAR) or $(VAR)
         for k, v in self.variables.items():
             line = line.replace(f"@({k})", str(v)).replace(f"${k}", str(v))
 
-        tokens = shlex.split(line)
+        try:
+            tokens = _parse_shell_words(line)
+        except ValueError as exc:
+            return f"\033[31m[SYNTAX ERROR] {exc}\033[0m"
+        if not tokens:
+            return None
         cmd = tokens[0].lower()
         args = tokens[1:]
 
@@ -946,7 +1524,7 @@ class OperatorShellEngine:
             if not executable.is_file():
                 return (
                     "\033[31m[POWCURL ERROR]\033[0m Runtime not built. "
-                    "Build it with .\\build.ps1 -Release."
+                    "Build it with `python build.py --release`."
                 )
             if not script_path.is_file():
                 return f"\033[31m[POWCURL ERROR]\033[0m Script not found: {args[0]}"
@@ -980,7 +1558,7 @@ class OperatorShellEngine:
             return f"AI acceleration backend: {self.gpu.select_backend()}"
 
         # Check script invocation shorthand (e.g. ./demo.sh or demo.bat)
-        if cmd.startswith("./") or cmd.endswith((".pow", ".sh", ".bash", ".ps1", ".bat", ".cmd", ".java", ".c", ".opsh")):
+        if cmd.startswith("./") or cmd.endswith((".pow", ".py", ".sh", ".bash", ".ps1", ".bat", ".cmd", ".java", ".c", ".opsh")):
             script = cmd.lstrip("./")
             return self.execute_script_file(script, args)
 
@@ -1007,13 +1585,40 @@ class OperatorShellEngine:
 
         # Distinct Custom Operator Command Vocabulary
         if cmd == "help":
-            return self.format_help()
+            return self.format_help(" ".join(args) if args else None)
+
+        elif cmd in ("office", "office.writer", "office.sheet", "office.slides"):
+            current_user = self.variables.get("SYS.USER", "operator")
+            cwd = self.variables.get("SYS.CWD", f"/Users/{current_user}/home")
+            if not hasattr(self, "office_suite"):
+                return "[OFFICE ERROR] Office suite is unavailable in this shell instance."
+            return self.office_suite.execute(cmd, args, cwd, current_user)
 
         elif cmd == "sys.probe":
             return self.format_sys_probe()
 
         elif cmd == "storage.inspect":
             return self.format_storage_inspect()
+
+        elif cmd == "backup.create":
+            if len(args) != 1:
+                return "Usage: backup.create <name>"
+            if self.variables.get("SYS.USER") != "root":
+                return "[PERMISSION DENIED] Creating system restore points requires superuser privileges. Use passd."
+            if not args[0].replace("-", "").replace("_", "").isalnum():
+                return "Backup name may contain only letters, numbers, '-' and '_'."
+            return self.reliability.create_restore_point(args[0])
+
+        elif cmd == "storage.cleanup":
+            if self.variables.get("SYS.USER") != "root":
+                return "[PERMISSION DENIED] Cleaning shared temporary storage requires superuser privileges. Use passd."
+            if len(args) > 1:
+                return "Usage: storage.cleanup [older-than-days]"
+            try:
+                age_days = int(args[0]) if args else 7
+            except ValueError:
+                return "storage.cleanup age must be an integer number of days."
+            return self._cleanup_temporary_storage(age_days)
 
         elif cmd == "ssh":
             if not args:
@@ -1131,6 +1736,11 @@ class OperatorShellEngine:
                 return f"\033[31m[Fetch Error]\033[0m {out['error']}"
             return f"\033[1;32m[HTTP {out.get('status_code')}]\033[0m Headers: {len(out.get('headers', {}))} | Body Preview:\n{out.get('preview', '')[:300]}..."
 
+        elif cmd == "net.speed":
+            if args:
+                return "Usage: net.speed"
+            return self.run_network_speed_test()
+
         elif cmd == "script.run":
             if not args:
                 return "Usage: script.run <path-to-script-file> [args...]"
@@ -1144,6 +1754,8 @@ class OperatorShellEngine:
             cur_u = self.variables.get("SYS.USER", "operator")
             try:
                 return self.google_drive.mount_interactively(username=cur_u)
+            except KeyboardInterrupt:
+                return "[DRIVE CANCELLED] Google Drive connection cancelled; Operator Shell is still running."
             except Exception as exc:
                 return f"\033[31m[DRIVE ERROR]\033[0m {exc}"
 
@@ -1163,11 +1775,11 @@ class OperatorShellEngine:
 
         elif cmd == "drive.ls":
             if len(args) > 1:
-                return "Usage: drive.ls [folder-id]"
-            folder_id = args[0] if args else "root"
+                return "Usage: drive.ls [remote-path]"
+            remote_path = args[0] if args else "root"
             cur_u = self.variables.get("SYS.USER", "operator")
             try:
-                entries = self.google_drive.list_files(folder_id, username=cur_u)
+                entries = self.google_drive.list_files(remote_path, username=cur_u)
             except Exception as exc:
                 return f"\033[31m[DRIVE ERROR]\033[0m {exc}"
             if not entries:
@@ -1181,7 +1793,7 @@ class OperatorShellEngine:
 
         elif cmd == "drive.download":
             if len(args) != 1:
-                return "Usage: drive.download <file-id>"
+                return "Usage: drive.download <file-id-or-path>"
             cur_u = self.variables.get("SYS.USER", "operator")
             try:
                 target = self.google_drive.download_file(args[0], username=cur_u)
@@ -1434,15 +2046,139 @@ class OperatorShellEngine:
 
         elif cmd == "app.launch":
             if not args: return "Usage: app.launch <app-name-or-id> (e.g. app.launch Calculator, app.launch Nano)"
-            target_app = args[0].lower()
-            if target_app in ("app.nano", "nano", "app.editor", "editor"):
-                target_f = args[1] if len(args) > 1 else None
+            target_app = " ".join(args)
+            if target_app.casefold() in ("app.nano", "nano", "app.editor", "editor", "operator code editor"):
+                return self.eval_command("nano")
+            if args[0].lower() in ("app.nano", "nano", "app.editor", "editor"):
+                target_f = " ".join(args[1:]) if len(args) > 1 else None
                 return self.eval_command(f"nano {target_f}" if target_f else "nano")
-            return self.app_mgr.launch(args[0])
+            return self.app_mgr.launch(target_app)
 
         elif cmd == "app.close":
             if not args: return "Usage: app.close <app-name-or-id>"
             return self.app_mgr.close(args[0])
+
+        elif cmd == "games.list":
+            current_user = self.variables.get("SYS.USER", "operator")
+            games_path, virtual_path = self.storage.resolve_vpath(
+                f"/Users/{current_user}/home/Games",
+                self.variables.get("SYS.CWD", f"/Users/{current_user}/home"),
+                current_user,
+            )
+            if not games_path.is_dir():
+                return f"[GAMES] No games directory exists at {virtual_path}."
+            games = sorted(
+                (entry for entry in games_path.iterdir() if entry.is_file() and entry.suffix.lower() == ".exe"),
+                key=lambda entry: entry.name.casefold(),
+            )
+            if not games:
+                return f"[GAMES] No installed games found in {virtual_path}."
+            game_states = {}
+            if hasattr(self, "game_mgr"):
+                game_states = {
+                    game["executable"].casefold(): game["status"]
+                    for game in self.game_mgr.list_games(games_path)
+                }
+            rows = ["GAME                           STATUS      EXECUTABLE", "-" * 76]
+            rows.extend(
+                f"{game.stem:<30} {game_states.get(game.name.casefold(), 'INSTALLED'):<11} {game.name}"
+                for game in games
+            )
+            return "\n".join(rows)
+
+        elif cmd in ("games.launch", "game.launch"):
+            if not args:
+                return "Usage: games.launch <game-name> [arguments...]"
+            current_user = self.variables.get("SYS.USER", "operator")
+            games_path, _ = self.storage.resolve_vpath(
+                f"/Users/{current_user}/home/Games",
+                self.variables.get("SYS.CWD", f"/Users/{current_user}/home"),
+                current_user,
+            )
+            if not hasattr(self, "game_mgr"):
+                return "[GAME ERROR] The game launcher is unavailable in this shell instance."
+            try:
+                return self.game_mgr.launch(args[0], games_path, args=args[1:])
+            except (FileNotFoundError, OSError, RuntimeError, ValueError) as exc:
+                return f"[GAME ERROR] {exc}"
+
+        elif cmd in ("python.check", "python.run"):
+            if not args or Path(args[0]).suffix.casefold() not in (".py", ".pyw"):
+                return f"Usage: {cmd} <file.py>" + (" [args...]" if cmd == "python.run" else "")
+            current_user = self.variables.get("SYS.USER", "operator")
+            cwd = self.variables.get("SYS.CWD", f"/Users/{current_user}/home")
+            script_path, _ = self.storage.resolve_vpath(args[0], cwd, current_user)
+            if not script_path.is_file():
+                return f"[PYTHON ERROR] Script was not found: {args[0]}"
+            if cmd == "python.check":
+                from apps.language_services import python_syntax_diagnostic
+
+                try:
+                    source = script_path.read_text(encoding="utf-8-sig")
+                except OSError as exc:
+                    return f"[PYTHON ERROR] Could not read {args[0]}: {exc}"
+                diagnostic = python_syntax_diagnostic(source, str(script_path))
+                return (
+                    f"[PYTHON SYNTAX ERROR] {args[0]}: {diagnostic}"
+                    if diagnostic
+                    else f"[PYTHON CHECK] {args[0]}: syntax OK"
+                )
+            try:
+                result = subprocess.run(
+                    [sys.executable, str(script_path.resolve()), *args[1:]],
+                    cwd=str(script_path.resolve().parent),
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                )
+            except OSError as exc:
+                return f"[PYTHON ERROR] Could not start Python: {exc}"
+            output = (result.stdout + result.stderr).strip()
+            if result.returncode:
+                return (
+                    f"[PYTHON ERROR] Script exited with code {result.returncode}.\n{output}"
+                    if output
+                    else f"[PYTHON ERROR] Script exited with code {result.returncode}."
+                )
+            return output or f"[PYTHON] {args[0]} completed."
+
+        elif cmd == "vyn.run":
+            if len(args) != 1 or Path(args[0]).suffix.casefold() != ".vyn":
+                return "Usage: vyn.run <file.vyn>"
+            current_user = self.variables.get("SYS.USER", "operator")
+            cwd = self.variables.get("SYS.CWD", f"/Users/{current_user}/home")
+            script_path, _ = self.storage.resolve_vpath(args[0], cwd, current_user)
+            if not script_path.is_file():
+                return f"[VYN ERROR] Script was not found: {args[0]}"
+            if not (VYN_RUNTIME_DIR / "main.py").is_file() or not (
+                VYN_RUNTIME_DIR / "dependency.py"
+            ).is_file():
+                return (
+                    f"[VYN ERROR] Interpreter was not found at {VYN_RUNTIME_DIR}. "
+                    "Set OPERATOR_VYN_HOME to the directory containing Vyn's main.py."
+                )
+            runner = (
+                "import sys; import dependency; "
+                "from functions import execute_line; "
+                "from variables import global_vars; "
+                "dependency.load_vyn_file(sys.argv[1], execute_line, global_vars.variables)"
+            )
+            try:
+                result = subprocess.run(
+                    [sys.executable, "-c", runner, str(script_path.resolve())],
+                    cwd=str(VYN_RUNTIME_DIR),
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                )
+            except OSError as exc:
+                return f"[VYN ERROR] Could not start the Vyn interpreter: {exc}"
+            output = (result.stdout + result.stderr).strip()
+            if result.returncode:
+                return f"[VYN ERROR] Interpreter exited with code {result.returncode}.\n{output}".strip()
+            return output or "[VYN] Script completed."
 
         # SQLite Service Manager Commands
         elif cmd == "service.list":
@@ -1512,24 +2248,191 @@ class OperatorShellEngine:
 
         # Service Manager Commands
         elif cmd == "srv.list":
+            if not self.services:
+                return f"[SERVICE ERROR] {self.service_runtime_error or 'C++ service runtime is unavailable.'}"
             srvs = self.services.list_services()
-            res = ["\033[1;36mUNIT                         LOAD   ACTIVE   SUB      DESCRIPTION\033[0m", "-"*72]
+            res = ["\033[1;36mUNIT                         ACTIVE     HEALTH      PID     RESTARTS   POLICY      DESCRIPTION\033[0m", "-"*92]
             for s in srvs:
-                res.append(f"{s['unit']:<28} {s['load']:<6} {s['active']:<8} {s['sub']:<8} {s['description']}")
+                res.append(
+                    f"{s['unit']:<28} {s['active']:<10} {s['sub']:<11} "
+                    f"{str(s['pid'] or '-'):<7} {s['restart_count']:<10} "
+                    f"{s['restart']:<11} {s['description']}"
+                )
             return "\n".join(res)
 
         elif cmd == "srv.start":
-            if not args: return "Usage: srv.start <service-name>"
+            if not args:
+                return "Usage: srv.start <service-name>"
+            if self.variables.get("SYS.USER") != "root":
+                return "[PERMISSION DENIED] Service process control requires superuser privileges. Use passd."
+            if not self.services:
+                return f"[SERVICE ERROR] {self.service_runtime_error or 'C++ service runtime is unavailable.'}"
             return self.services.start(args[0])
 
         elif cmd == "srv.stop":
-            if not args: return "Usage: srv.stop <service-name>"
+            if not args:
+                return "Usage: srv.stop <service-name>"
+            if self.variables.get("SYS.USER") != "root":
+                return "[PERMISSION DENIED] Service process control requires superuser privileges. Use passd."
+            if not self.services:
+                return f"[SERVICE ERROR] {self.service_runtime_error or 'C++ service runtime is unavailable.'}"
             return self.services.stop(args[0])
 
+        elif cmd == "srv.restart":
+            if len(args) != 1:
+                return "Usage: srv.restart <service-name>"
+            if self.variables.get("SYS.USER") != "root":
+                return "[PERMISSION DENIED] Service process control requires superuser privileges. Use passd."
+            if not self.services:
+                return f"[SERVICE ERROR] {self.service_runtime_error or 'C++ service runtime is unavailable.'}"
+            return self.services.restart(args[0])
+
+        elif cmd == "srv.register":
+            if len(args) < 3 or "--" not in args:
+                return (
+                    "Usage: srv.register <name> [--description <text>] "
+                    "[--restart no|on-failure|always] [--health process|tcp:host:port] "
+                    "-- <executable> [args...]"
+                )
+            if self.variables.get("SYS.USER") != "root":
+                return "[PERMISSION DENIED] Registering host processes requires superuser privileges. Use passd."
+            if not self.services:
+                return f"[SERVICE ERROR] {self.service_runtime_error or 'C++ service runtime is unavailable.'}"
+            separator = args.index("--")
+            name = args[0]
+            options = args[1:separator]
+            command = args[separator + 1:]
+            if not command:
+                return "srv.register requires an executable after '--'."
+            description = name
+            restart_policy = "always"
+            health_check = "process"
+            index = 0
+            try:
+                while index < len(options):
+                    option = options[index]
+                    if option in ("--description", "--restart", "--health") and index + 1 < len(options):
+                        value = options[index + 1]
+                        if option == "--description":
+                            description = value
+                        elif option == "--restart":
+                            restart_policy = value
+                        else:
+                            health_check = value
+                        index += 2
+                    else:
+                        return f"Unknown or incomplete service option: {option}"
+                registered = self.services.register(
+                    name,
+                    command,
+                    description,
+                    restart_policy,
+                    health_check,
+                )
+                if not registered.startswith("[SRV REGISTERED]"):
+                    return registered
+                started = self.services.start(name)
+                return f"{registered}\n{started}"
+            except (OSError, ValueError) as exc:
+                return f"[SERVICE ERROR] {exc}"
+
+        elif cmd == "srv.remove":
+            if len(args) != 1:
+                return "Usage: srv.remove <service-name>"
+            if self.variables.get("SYS.USER") != "root":
+                return "[PERMISSION DENIED] Service process control requires superuser privileges. Use passd."
+            if not self.services:
+                return f"[SERVICE ERROR] {self.service_runtime_error or 'C++ service runtime is unavailable.'}"
+            return self.services.remove(args[0])
+
         elif cmd == "srv.logs":
-            if not args: return "Usage: srv.logs <service-name>"
-            logs = self.services.get_logs(args[0])
-            return "\n".join(logs)
+            if not args or len(args) > 2:
+                return "Usage: srv.logs <service-name> [count]"
+            if self.variables.get("SYS.USER") != "root":
+                return "[PERMISSION DENIED] Service logs require superuser privileges. Use passd."
+            if not self.services:
+                return f"[SERVICE ERROR] {self.service_runtime_error or 'C++ service runtime is unavailable.'}"
+            try:
+                return "\n".join(self.services.get_logs(args[0], int(args[1]) if len(args) == 2 else 100))
+            except ValueError:
+                return "srv.logs count must be an integer."
+
+        elif cmd == "cron.add":
+            if len(args) < 4:
+                return "Usage: cron.add <name> <interval-seconds> <safe-command...>"
+            if not self.services:
+                return f"[SCHEDULER ERROR] {self.service_runtime_error or 'C++ scheduler runtime is unavailable.'}"
+            try:
+                interval = int(args[1])
+                job_command = shlex.join(args[2:])
+                existing_job = next(
+                    (job for job in self.services.list_jobs() if job["name"] == args[0]),
+                    None,
+                )
+                current_user = self.variables["SYS.USER"]
+                if existing_job and existing_job["owner"] != current_user and current_user != "root":
+                    return "[PERMISSION DENIED] A scheduled job with that name belongs to another user."
+                error = self._validate_scheduled_command(job_command, self.variables["SYS.USER"])
+                if error:
+                    return f"[SCHEDULER ERROR] {error}"
+                return self.services.add_job(
+                    args[0],
+                    self.variables["SYS.USER"],
+                    interval,
+                    job_command,
+                )
+            except (OSError, ValueError) as exc:
+                return f"[SCHEDULER ERROR] {exc}"
+
+        elif cmd == "cron.list":
+            if args:
+                return "Usage: cron.list"
+            if not self.services:
+                return f"[SCHEDULER ERROR] {self.service_runtime_error or 'C++ scheduler runtime is unavailable.'}"
+            current_user = self.variables.get("SYS.USER", "operator")
+            jobs = [
+                job for job in self.services.list_jobs()
+                if job["owner"] == current_user or current_user == "root"
+            ]
+            if not jobs:
+                return "No scheduled jobs."
+            rows = ["NAME                 OWNER          INTERVAL   NEXT RUN             STATE      COMMAND", "-" * 104]
+            for job in jobs:
+                state = "running" if job["running"] else "scheduled"
+                rows.append(
+                    f"{job['name']:<20} {job['owner']:<14} {job['interval_seconds']:<10} "
+                    f"{job['next_run']:<20} {state:<10} {job['command']}"
+                )
+            return "\n".join(rows)
+
+        elif cmd == "cron.remove":
+            if len(args) != 1:
+                return "Usage: cron.remove <name>"
+            if not self.services:
+                return f"[SCHEDULER ERROR] {self.service_runtime_error or 'C++ scheduler runtime is unavailable.'}"
+            current_user = self.variables.get("SYS.USER", "operator")
+            job = next((job for job in self.services.list_jobs() if job["name"] == args[0]), None)
+            if not job:
+                return f"[SCHEDULER ERROR] Unknown job '{args[0]}'."
+            if job["owner"] != current_user and current_user != "root":
+                return "[PERMISSION DENIED] You can only remove your own scheduled jobs."
+            return self.services.remove_job(args[0])
+
+        elif cmd == "cron.logs":
+            if not args or len(args) > 2:
+                return "Usage: cron.logs <name> [count]"
+            if not self.services:
+                return f"[SCHEDULER ERROR] {self.service_runtime_error or 'C++ scheduler runtime is unavailable.'}"
+            job = next((job for job in self.services.list_jobs() if job["name"] == args[0]), None)
+            if not job:
+                return f"[SCHEDULER ERROR] Unknown job '{args[0]}'."
+            current_user = self.variables.get("SYS.USER", "operator")
+            if job["owner"] != current_user and current_user != "root":
+                return "[PERMISSION DENIED] You can only view your own scheduled job logs."
+            try:
+                return "\n".join(self.services.get_job_logs(args[0], int(args[1]) if len(args) == 2 else 100))
+            except ValueError:
+                return "cron.logs count must be an integer."
 
         # Reliability & Dev Tools
         elif cmd == "rel.restore":
@@ -2118,8 +3021,42 @@ Licensed to: Operator Node (Workstation Edition)"""
                 res.append(f"{st:<8} {s['name']:<18} {s['description']}")
             return "\n".join(res)
 
+        elif cmd == "time":
+            current = self.time_service.current_time()
+            status = self.time_service.status()
+            sync_state = (
+                f"NTP offset {status['offset_seconds']:+.3f}s"
+                if status["offset_seconds"] is not None
+                else "NTP not synchronized"
+            )
+            return f"{current.strftime('%A, %B %d, %Y %I:%M:%S %p %Z')} ({sync_state})"
+
+        elif cmd == "time.service":
+            operation = args[0].lower() if args else "status"
+            if operation == "start":
+                self.time_service.start()
+                return "[TIME SERVICE] NTP synchronization service started."
+            if operation == "sync":
+                if len(args) > 2:
+                    return "Usage: time.service sync [ntp-server]"
+                return self.time_service.sync_now(args[1] if len(args) == 2 else None)
+            if operation != "status":
+                return "Usage: time.service [status|start|sync [ntp-server]]"
+            status = self.time_service.status()
+            synchronized = (
+                f"offset={status['offset_seconds']:+.3f}s"
+                if status["offset_seconds"] is not None
+                else "not synchronized"
+            )
+            last_sync = status["last_sync"].isoformat() if status["last_sync"] else "never"
+            last_error = f"\nLast error: {status['last_error']}" if status["last_error"] else ""
+            return (
+                f"Time service: {'running' if status['running'] else 'stopped'}; "
+                f"{synchronized}; last sync: {last_sync}{last_error}"
+            )
+
         elif cmd in ("get-date", "date"):
-            return time.strftime("%A, %B %d, %Y %I:%M:%S %p")
+            return self.eval_command("time")
 
         elif cmd in ("test-connection", "ping"):
             host = args[0] if args else "127.0.0.1"
@@ -2310,7 +3247,10 @@ def print_banner():
     c.print(banner_panel)
 
 def main():
+    import atexit
+
     engine = OperatorShellEngine()
+    atexit.register(engine.close)
     print_banner()
 
     if len(sys.argv) > 1:
@@ -2323,7 +3263,7 @@ def main():
         target = tokens[0]
         # Append executed CLI commands to persistent storage
         engine.storage.append_command_history(raw_input_cmd)
-        if target.endswith((".sh", ".bash", ".ps1", ".bat", ".cmd", ".opsh")):
+        if target.endswith((".py", ".sh", ".bash", ".ps1", ".bat", ".cmd", ".opsh")):
             res = engine.execute_script_file(target, tokens[1:])
         else:
             res = engine.eval_command(raw_input_cmd)

@@ -283,6 +283,37 @@ class GPUManager:
         live = any(device.get("driver_loaded", False) for device in devices)
         return {"backend": backend, "devices": devices, "live": live, "errors": self.probe_errors}
 
+    @staticmethod
+    def set_high_performance_preference(executable: str | Path) -> str:
+        """Ask Windows to prefer its high-performance GPU for this executable."""
+        if os.name != "nt":
+            return "Host GPU selection is controlled by the operating system/driver."
+        try:
+            import winreg
+
+            preference_key = winreg.CreateKeyEx(
+                winreg.HKEY_CURRENT_USER,
+                r"Software\Microsoft\DirectX\UserGpuPreferences",
+                0,
+                winreg.KEY_SET_VALUE,
+            )
+            try:
+                winreg.SetValueEx(
+                    preference_key,
+                    str(Path(executable).resolve()),
+                    0,
+                    winreg.REG_SZ,
+                    "GpuPreference=2;",
+                )
+            finally:
+                winreg.CloseKey(preference_key)
+        except OSError as exc:
+            return f"Windows GPU preference could not be set: {exc}"
+        return (
+            "Windows high-performance GPU preference requested; the active GPU "
+            "is selected by Windows and its graphics driver."
+        )
+
     def environment(self) -> dict[str, str]:
         """Return safe environment hints for launching GPU-aware programs."""
         backend = self.select_backend()

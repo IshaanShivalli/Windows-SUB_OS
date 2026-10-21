@@ -11,7 +11,6 @@ from typing import Optional
 
 from prompt_toolkit.application import Application
 from prompt_toolkit.buffer import Buffer
-from prompt_toolkit.completion import WordCompleter
 from prompt_toolkit.document import Document
 from prompt_toolkit.enums import EditingMode
 from prompt_toolkit.filters import Condition
@@ -31,6 +30,9 @@ from prompt_toolkit.styles import Style
 from prompt_toolkit.lexers import PygmentsLexer
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT_DIR))
+from apps.language_services import LanguageCompleter, python_syntax_diagnostic
+
 DB_PATH = ROOT_DIR / "db" / "operator_system.db"
 PACKAGE_REPO = ROOT_DIR / "packages" / "repo"
 
@@ -39,6 +41,44 @@ try:
     from pygments.lexers import get_lexer_for_filename
 except ImportError:
     get_lexer_for_filename = None
+
+try:
+    from pygments.lexer import RegexLexer
+    from pygments.token import Comment, Keyword, Name, Number, Operator, Punctuation, String, Text
+
+    class VynLexer(RegexLexer):
+        name = "Vyn"
+        aliases = ["vyn"]
+        filenames = ["*.vyn"]
+        tokens = {
+            "root": [
+                (r"#.*$", Comment.Single),
+                (r'"(?:\\.|[^"\\])*"', String.Double),
+                (r"'(?:\\.|[^'\\])*'", String.Single),
+                (
+                    r"\b(?:IF|Elif|Else|if|do|end|forLoop|forIn|whileLoop|repeatUntil|"
+                    r"endLoop|function|perform|endFunc|return|Class|obj|have|endClass|"
+                    r"switch|case|default|try|catch|finally|throw|import|break|continue|"
+                    r"const|struct|union|impl|lock|lockGroup|endLock|timed|endTimed|"
+                    r"react|watch|snapshot|rollback|unlockAll)\b",
+                    Keyword,
+                ),
+                (r"\b(?:true|false|nil|NIL|None|Some|Ok|Err)\b", Keyword.Constant),
+                (
+                    r"\b(?:print|IN|DOF|memsize|memzero|memcopy|memdump|sizeof|"
+                    r"connectSqlite|connectMysql|connectPostgres|dbQuery|dbExecute|dbClose)\b",
+                    Name.Builtin,
+                ),
+                (r"\b\d+(?:\.\d+)?\b", Number),
+                (r"\+\+|<-|\*\*|==|!=|<=|>=|[+\-*/%=:<>?]", Operator),
+                (r"[{}()\[\],.;]", Punctuation),
+                (r"[A-Za-z_]\w*", Name),
+                (r"\s+", Text),
+                (r".", Text),
+            ]
+        }
+except ImportError:
+    VynLexer = None
 
 
 def load_language_extension(filepath: Optional[str], db_path: Path = DB_PATH) -> Optional[dict]:
@@ -110,6 +150,7 @@ class OperatorCodeEditor:
         self.language_extension = load_language_extension(filepath, extension_db_path)
         self.language = self.language_extension["language"] if self.language_extension else "Plain Text"
         self.completion_words = self.language_extension["completions"] if self.language_extension else []
+        self.python_diagnostic = None
 
         # Load file content if existing
         if self.filepath and os.path.exists(self.filepath) and os.path.isfile(self.filepath):
@@ -133,6 +174,7 @@ class OperatorCodeEditor:
             multiline=True,
             on_text_changed=self._on_text_changed,
         )
+        self._update_python_diagnostic(self.original_content)
 
         # Prompt input buffer for Ctrl+O, Ctrl+W, etc.
         self.prompt_buffer = Buffer(multiline=False)
@@ -178,19 +220,23 @@ class OperatorCodeEditor:
             full_screen=True,
             mouse_support=True,
             editing_mode=EditingMode.EMACS,
+            min_redraw_interval=0,
+            max_render_postpone_time=0,
+            terminal_size_polling_interval=1.0,
         )
 
     def _make_completer(self):
-        if not self.completion_words:
+        if not self.language_extension:
             return None
-        return WordCompleter(
-            self.completion_words,
-            ignore_case=False,
-            sentence=True,
-            meta_dict={word: self.language for word in self.completion_words},
-        )
+        return LanguageCompleter(self.language_extension)
 
     def _get_lexer(self):
+        if (
+            self.language_extension
+            and self.language_extension["package_id"] == "editor.lang.vyn"
+            and VynLexer is not None
+        ):
+            return PygmentsLexer(VynLexer)
         if get_lexer_for_filename and self.filepath:
             try:
                 return PygmentsLexer(get_lexer_for_filename(self.filepath).__class__)
@@ -212,9 +258,20 @@ class OperatorCodeEditor:
         return self.text_buffer.text != self.original_content
 
     def _on_text_changed(self, buf):
-        # Clear transient position message if user starts typing
-        if self.message.startswith("[ line "):
-            self.message = ""
+        self.message = ""
+        self._update_python_diagnostic(buf.text)
+
+    def _update_python_diagnostic(self, source):
+        if (
+            self.language_extension
+            and self.language_extension["package_id"] == "editor.lang.python"
+        ):
+            self.python_diagnostic = python_syntax_diagnostic(
+                source,
+                self.filename or "<buffer>",
+            )
+        else:
+            self.python_diagnostic = None
 
     def _get_titlebar_text(self):
         term_width = shutil.get_terminal_size((80, 24)).columns
@@ -234,8 +291,21 @@ class OperatorCodeEditor:
             return [("class:prompt.label", f" {self.prompt_text} ")]
         doc = self.text_buffer.document
         position = f"Ln {doc.cursor_position_row + 1}, Col {doc.cursor_position_col + 1}"
-        extension_status = "Autocomplete on" if self.completion_words else "Autocomplete extension not installed"
-        status = self.message or f"{self.language}  |  {extension_status}"
+        extension_status = (
+            "Completion: type or Tab"
+            if self.completion_words
+            else "Autocomplete extension not installed"
+        )
+        language_status = f"{self.language}  |  {extension_status}"
+        if self.language_extension and self.language_extension["package_id"] == "editor.lang.python":
+            language_status += (
+                f"  |  Syntax error: {self.python_diagnostic}"
+                if self.python_diagnostic
+                else "  |  Syntax OK"
+            )
+        elif self.language_extension and self.language_extension["package_id"] == "editor.lang.vyn":
+            language_status += "  |  Run with vyn.run for interpreter diagnostics"
+        status = self.message or language_status
         return [
             ("class:statusbar.msg", f"  {status}  "),
             ("class:statusbar", f"{position}  "),
@@ -275,7 +345,7 @@ class OperatorCodeEditor:
     def _get_help_text(self):
         return """
   ====================== OPERATOR EDITOR HELP ======================
-  Code editor with syntax highlighting and optional language completion.
+  Code editor with language highlighting, completion, and Python syntax checks.
 
   ^G (Ctrl+G)  Display this help window
   ^X (Ctrl+X)  Close current buffer / Exit
@@ -287,7 +357,9 @@ class OperatorCodeEditor:
   ^C (Ctrl+C)  Display current cursor coordinates (line, col, char)
   ^_ (Ctrl+_)  Go to specific line and column number
   ^R (Ctrl+R)  Insert external file content into current buffer
-  Tab          Accept the selected completion
+  Tab          Request or accept a completion
+  Python       Syntax is checked while editing; use python.run to execute a saved file
+  Vyn          Use vyn.run <file.vyn> to execute with the configured interpreter
 
   Navigation: Arrow keys move cursor, Home/End jump to line boundaries,
   PageUp/PageDown scroll viewport. Install editor.lang.<language> packages
@@ -599,7 +671,10 @@ class OperatorCodeEditor:
             self.language = self.language_extension["language"] if self.language_extension else "Plain Text"
             self.completion_words = self.language_extension["completions"] if self.language_extension else []
             self.text_buffer.completer = self._make_completer()
-            self.text_buffer.complete_while_typing = bool(self.completion_words)
+            self.text_buffer.complete_while_typing = Condition(
+                lambda: bool(self.completion_words)
+            )
+            self._update_python_diagnostic(self.text_buffer.text)
             self.editor_control.lexer = self._get_lexer()
             lines = len(self.text_buffer.text.splitlines())
             self.message = f"[ Wrote {lines} line{'s' if lines != 1 else ''} to '{self.filename}' ]"
