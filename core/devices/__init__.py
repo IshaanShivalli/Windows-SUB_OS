@@ -1,0 +1,1 @@
+"""Host hardware discovery integrations."""

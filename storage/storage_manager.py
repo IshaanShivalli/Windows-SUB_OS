@@ -9,9 +9,19 @@ SECTOR_SIZE = 512
 BLOCK_SIZE = 4096
 MAGIC_SIGNATURE = b"OPERATOR_FS_2GB"
 
-STORAGE_IMG_PATH = Path(__file__).resolve().parent / "operator_storage_2gb.img"
+STORAGE_IMG_PATH = Path(
+    os.environ.get(
+        "OPERATOR_STORAGE_IMAGE",
+        Path(__file__).resolve().parent / "operator_storage_2gb.img",
+    )
+)
 META_PATH = Path(__file__).resolve().parent / "storage_metadata.json"
-OS_ROOT_PATH = Path(__file__).resolve().parent / "operator_os_root"
+OS_ROOT_PATH = Path(
+    os.environ.get(
+        "OPERATOR_OS_ROOT_PATH",
+        Path(__file__).resolve().parent / "operator_os_root",
+    )
+)
 
 class OperatorStorageManager:
     """
@@ -193,19 +203,23 @@ class OperatorStorageManager:
         return False
 
     def get_disk_info(self):
-        size_on_disk = self.img_path.stat().st_size if self.img_path.exists() else 0
-        used_simulated = 184 * 1024 * 1024 # initial system files overhead
-        free_bytes = TOTAL_STORAGE_BYTES - used_simulated
+        os_root = self.get_os_root()
+        used_bytes = sum(
+            path.stat().st_size
+            for path in os_root.rglob("*")
+            if path.is_file()
+        )
+        free_bytes = max(0, TOTAL_STORAGE_BYTES - used_bytes)
         return {
             "device": "/dev/nvme0n1_operator",
             "capacity_bytes": TOTAL_STORAGE_BYTES,
             "capacity_gb": 2.0,
-            "used_bytes": used_simulated,
+            "used_bytes": used_bytes,
             "free_bytes": free_bytes,
             "filesystem": "EXT-OPFS (Operator File System)",
             "sector_size": SECTOR_SIZE,
             "block_size": BLOCK_SIZE,
-            "status": "MOUNTED (RW, synchronous, journaled)"
+            "status": "VIRTUAL (directory-backed, RW)"
         }
 
     def get_history_file_path(self):

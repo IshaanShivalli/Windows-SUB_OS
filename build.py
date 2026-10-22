@@ -5,7 +5,10 @@ import argparse
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
+
+from install.runtime_packager import package_runtime
 
 
 ROOT_DIR = Path(__file__).resolve().parent
@@ -36,17 +39,7 @@ def run(command: list[str], label: str, *, cwd: Path = ROOT_DIR) -> None:
         raise BuildError(f"{label} failed with exit code {exc.returncode}.") from exc
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--release",
-        action="store_true",
-        help="Build Rust components with release optimizations.",
-    )
-    args = parser.parse_args(argv)
-
-    runtime_java_bin = ROOT_DIR / "runtime_java" / "bin"
-    bin_dir = ROOT_DIR / "bin"
+def _build_components(args, runtime_java_bin: Path, bin_dir: Path) -> None:
     runtime_java_bin.mkdir(parents=True, exist_ok=True)
     bin_dir.mkdir(parents=True, exist_ok=True)
 
@@ -149,6 +142,50 @@ def main(argv: list[str] | None = None) -> int:
         destination = bin_dir / f"{target}.exe"
         shutil.copy2(built, destination)
         print(f"[BUILD] Copied {target} to {destination}")
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--release",
+        action="store_true",
+        help="Build Rust components with release optimizations.",
+    )
+    parser.add_argument(
+        "--package-runtime",
+        action="store_true",
+        help="Package the built runtime under storage/operator_os_root/System.",
+    )
+    parser.add_argument(
+        "--rclone-executable",
+        type=Path,
+        help="Local rclone.exe to include with --package-runtime.",
+    )
+    args = parser.parse_args(argv)
+    if args.package_runtime and args.rclone_executable is None:
+        parser.error("--rclone-executable is required with --package-runtime.")
+
+    if args.package_runtime:
+        with tempfile.TemporaryDirectory(prefix="operator-runtime-build-") as temporary:
+            output = Path(temporary)
+            bin_dir = output / "bin"
+            runtime_java_bin = output / "runtime_java" / "bin"
+            _build_components(args, runtime_java_bin, bin_dir)
+            try:
+                package_runtime(
+                    ROOT_DIR,
+                    args.rclone_executable,
+                    binary_dir=bin_dir,
+                    java_bin=runtime_java_bin,
+                )
+            except (OSError, RuntimeError, ValueError) as exc:
+                raise BuildError(f"Runtime packaging failed: {exc}") from exc
+    else:
+        _build_components(
+            args,
+            ROOT_DIR / "runtime_java" / "bin",
+            ROOT_DIR / "bin",
+        )
 
     print("[BUILD] All requested components built successfully.")
     return 0

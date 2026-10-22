@@ -367,11 +367,20 @@ class RcloneDriveManager:
     @staticmethod
     def _find_rclone():
         executable = shutil.which("rclone")
-        if not executable:
-            raise RuntimeError(
-                "rclone was not found on PATH. Install rclone, then run drive.mount to configure Google Drive."
-            )
-        return executable
+        if executable:
+            return executable
+
+        packaged_candidates = (
+            ROOT_DIR / "bin" / "rclone.exe",
+            ROOT_DIR / "storage" / "operator_os_root" / "System" / "bin" / "rclone.exe",
+        )
+        for candidate in packaged_candidates:
+            if candidate.is_file():
+                return str(candidate)
+        raise RuntimeError(
+            "rclone was not found on PATH or in the packaged Operator runtime. "
+            "Install rclone or rebuild with --rclone-executable, then run drive.mount."
+        )
 
     @staticmethod
     def _run_rclone(executable, *arguments, config_path):

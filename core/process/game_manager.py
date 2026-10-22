@@ -53,19 +53,36 @@ class GameManager:
         if not games_path.is_dir():
             raise FileNotFoundError(f"Games directory does not exist: {games_path}")
 
-        requested_name = game_name.casefold()
+        requested_path = Path(game_name)
+        if requested_path.is_absolute():
+            candidate = requested_path.resolve()
+        elif requested_path.parts and requested_path.parts[0].casefold() == games_path.name.casefold():
+            candidate = (games_path.parent / requested_path).resolve()
+        else:
+            candidate = (games_path / requested_path).resolve()
+        try:
+            candidate.relative_to(games_path)
+        except ValueError:
+            raise ValueError("Game path must stay inside the installed Games directory") from None
+
+        requested_name = candidate.stem.casefold() if candidate.suffix else game_name.casefold()
         if requested_name.endswith(".exe"):
             requested_name = requested_name[:-4]
-        executable = next(
-            (
-                path
-                for path in games_path.iterdir()
-                if path.is_file()
-                and path.suffix.casefold() == ".exe"
-                and path.stem.casefold() == requested_name
-            ),
-            None,
-        )
+        if candidate.suffix.casefold() == ".exe":
+            executable = candidate if candidate.is_file() else None
+        elif candidate.suffix:
+            executable = None
+        else:
+            executable = next(
+                (
+                    path
+                    for path in games_path.iterdir()
+                    if path.is_file()
+                    and path.suffix.casefold() == ".exe"
+                    and path.stem.casefold() == requested_name
+                ),
+                None,
+            )
         if executable is None:
             raise FileNotFoundError(f"Installed game was not found: {game_name}")
 

@@ -4,7 +4,18 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 ROOT_DIR = Path(__file__).resolve().parent.parent.parent
-DEFAULT_VFS_BASE = ROOT_DIR / "storage" / "operator_os_root"
+DEFAULT_VFS_BASE = Path(
+    os.environ.get(
+        "OPERATOR_OS_ROOT_PATH",
+        ROOT_DIR / "storage" / "operator_os_root",
+    )
+)
+HOST_STORAGE_BASE = Path(
+    os.environ.get(
+        "OPERATOR_STORAGE_ROOT_PATH",
+        ROOT_DIR / "storage",
+    )
+)
 
 class HostFilesystemBridge:
     _instance = None
@@ -20,7 +31,7 @@ class HostFilesystemBridge:
         self.mount_map: Dict[str, Path] = {
             "/": DEFAULT_VFS_BASE,
             "/home/operator": DEFAULT_VFS_BASE / "home" / "operator",
-            "/host-storage": ROOT_DIR / "storage"
+            "/host-storage": HOST_STORAGE_BASE
         }
         for p in self.mount_map.values():
             p.mkdir(parents=True, exist_ok=True)

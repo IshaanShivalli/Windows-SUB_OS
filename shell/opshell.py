@@ -161,6 +161,7 @@ SPECIAL_COMMAND_HELP = {
     "cron.remove": ("cron.remove <name>", "Remove a scheduled job."),
     "db.query": ("db.query <sql>", "Run a SQL query against the Operator system registry."),
     "date": ("date", "Display the current local time using the Operator time service."),
+    "device.list": ("device.list [usb|display|audio]", "List host devices visible to Operator, including Plug and Play status and driver details."),
     "dev.build": ("dev.build [target]", "Run an Operator development build target."),
     "dev.test": ("dev.test [target]", "Run Operator subsystem tests."),
     "dev.trace": ("dev.trace [options]", "Inspect syscall and subsystem execution traces."),
@@ -200,10 +201,6 @@ SPECIAL_COMMAND_HELP = {
     "net.resolve": ("net.resolve <host>", "Resolve a hostname through the Operator networking layer."),
     "net.routes": ("net.routes", "Display the host-assisted network routing table."),
     "net.speed": ("net.speed", "Continuously measure download, upload, and average network speed; press Ctrl+C to stop."),
-    "office": ("office", "Open the graphical Operator Office file manager and document launcher."),
-    "office.writer": ("office.writer [file]", "Open the graphical Writer and optionally load a document."),
-    "office.sheet": ("office.sheet [file.opsheet]", "Open the graphical database spreadsheet and optionally load a workbook."),
-    "office.slides": ("office.slides [file.opsdeck]", "Open the graphical presentation editor and optionally load a deck."),
     "passd": ("passd <command...>", "Authenticate as root and run one privileged Operator command."),
     "passd.setup": ("passd.setup", "Create or change the separate passd password; changes require the current password."),
     "python.check": ("python.check <file.py>", "Compile-check a Python source file without executing it."),
@@ -256,6 +253,7 @@ SPECIAL_COMMAND_HELP = {
     "user.login": ("user.login <name> <password>", "Authenticate and switch to an Operator account."),
     "user.memory": ("user.memory [name]", "Inspect an account's allocated memory pool and virtual pages."),
     "user.switch": ("user.switch <name>", "Switch the active Operator account."),
+    "logout": ("logout", "Switch back to the default operator account."),
     "user.whoami": ("user.whoami", "Display the active Operator account and role."),
     "var.get": ("var.get <name>", "Read a shell environment variable."),
     "var.set": ("var.set <name>=<value>", "Set a shell environment variable."),
@@ -287,11 +285,11 @@ from core.devtools.dev_tools import DeveloperTools
 from boot_target.boot_builder import BootableTargetBuilder
 from pow.engine import PowEngine
 from core.gpu.gpu_manager import GPUManager
+from core.devices.device_manager import DeviceManager
 from apps.nano import OperatorCodeEditor
 from core.security.user_manager import UserManager
 from core.memory.user_memory_manager import UserMemoryManager
 from network.speed_test import NetworkSpeedTester
-from core.office_suite import OfficeSuite
 
 from rich.console import Console
 from rich.table import Table
@@ -409,11 +407,11 @@ class OperatorShellEngine:
         self.devtools = DeveloperTools()
         self.boot_builder = BootableTargetBuilder()
         self.gpu = GPUManager()
+        self.device_manager = DeviceManager()
         self.game_mgr = GameManager(self.gpu)
         self.pow = PowEngine(ROOT_DIR, operator_runner=self.eval_command)
         self.user_mgr = UserManager()
         self.mem_mgr = UserMemoryManager()
-        self.office_suite = OfficeSuite(self.storage.resolve_vpath)
         self.time_service = TimeService()
         self.time_service.start()
         self._passd_auth_cache = {}
@@ -470,10 +468,9 @@ class OperatorShellEngine:
             "srv.logs", "rel.restore", "rel.health", "dev.test", "dev.trace", "dev.build", "boot.iso",
             "srv.register", "srv.remove", "srv.restart", "time", "time.service", "games.list",
             "games.launch", "game.launch", "vyn.run", "python.run", "python.check",
-            "office", "office.writer", "office.sheet", "office.slides",
-            "pow", "pow.exec", "gpu.probe", "gpu.compute", "gpu.active", "gpu.ai", "db.query", "var.set", "var.get", "cd", "ls",
+            "pow", "pow.exec", "gpu.probe", "gpu.compute", "gpu.active", "gpu.ai", "device.list", "db.query", "var.set", "var.get", "cd", "ls",
             "pwd", "cat", "touch", "grep", "head", "tail", "find", "du", "stat", "file", "basename", "dirname", "realpath", "sort", "uniq", "cut", "tr", "echo", "true", "false", "which", "ll", "la", "env", "printenv", "hostname", "id", "df", "free", "mem", "uname", "uptime", "wc", "mkdir", "rm", "del",
-            "user.list", "user.create", "user.delete", "user.login", "user.switch", "user.whoami",
+            "user.list", "user.create", "user.delete", "user.login", "user.switch", "logout", "user.whoami",
             "user.memory", "useradd", "userdel", "login", "su", "whoami", "users", "mem.user",
             "get-process", "ps", "get-service", "get-date", "date", "test-connection", "ping",
             "get-computerinfo", "ver", "systeminfo", "ipconfig", "tree", "dir", "type", "cls",
@@ -825,6 +822,7 @@ class OperatorShellEngine:
                 ("sys.probe", "Comprehensive kernel, CPU, scheduler & storage telemetry"),
                 ("mem / free", "Show live physical RAM and swap usage"),
                 ("gpu.probe", "Show detected GPU hardware and host driver status"),
+                ("device.list [usb|display|audio]", "List present USB, display/monitor, and audio devices with Windows driver status"),
                 ("system.health", "Live subsystem reliability and health check"),
                 ("proc.list / proc.top", "Active process CPU, memory, and runtime monitor"),
                 ("proc.start <name> <cmd>", "Spawn a managed subsystem background process"),
@@ -834,7 +832,6 @@ class OperatorShellEngine:
                 ("nano [file]", "Open Operator's code editor"),
                 ("python.run <file.py> [args...]", "Run Python source with the host Python interpreter"),
                 ("python.check <file.py>", "Compile-check Python syntax without executing the file"),
-                ("office / office.writer / office.sheet / office.slides", "Open the graphical office suite, editors, and database spreadsheets"),
                 ("app.launch <app>", "Launch a manifest-based app"),
                 ("games.list", "List installed games"),
                 ("games.launch <name> [args...]", "Launch an installed game using its LÖVE runtime and Windows high-performance GPU preference"),
@@ -872,6 +869,7 @@ class OperatorShellEngine:
                 ("passd user.delete <name>", "Delete user, purge files & reclaim memory pool (passd)"),
                 ("user.login <name> <pass>", "Authenticate and switch active user session"),
                 ("user.switch / su <name>", "Switch active user session context"),
+                ("logout", "Switch back to the default operator account and home"),
                 ("user.whoami / whoami", "Show current active user and session role"),
                 ("user.memory / mem.user [name]", "Telemetry on dedicated memory pool & virtual pages"),
             ]),
@@ -1547,6 +1545,52 @@ class OperatorShellEngine:
         if cmd == "gpu.probe":
             return self.format_gpu_probe()
 
+        if cmd == "device.list":
+            if len(args) > 1:
+                return "Usage: device.list [usb|display|audio]"
+            category = args[0].casefold() if args else None
+            if category not in (None, "usb", "display", "audio"):
+                return "Device category must be usb, display, or audio."
+            try:
+                devices = self.device_manager.list_devices(category)
+            except RuntimeError as exc:
+                return f"[DEVICE ERROR] {exc}"
+            if not devices:
+                return f"No present {category or 'supported'} devices were found."
+            buf = io.StringIO()
+            console = Console(file=buf, force_terminal=True, width=120)
+            table = Table(
+                title="HOST DEVICES VISIBLE TO OPERATOR",
+                box=ROUNDED,
+                border_style="cyan",
+                expand=True,
+            )
+            table.add_column("Type", style="bold cyan")
+            table.add_column("Device")
+            table.add_column("Status", style="green")
+            table.add_column("Host driver", style="yellow")
+            table.add_column("Hardware ID", overflow="fold")
+            for device in devices:
+                table.add_row(
+                    device["category"],
+                    device["name"],
+                    device["status"],
+                    " ".join(
+                        value for value in (
+                            device["driver_provider"],
+                            device["driver_version"],
+                        ) if value != "Unknown"
+                    ) or "Unknown",
+                    device["instance_id"],
+                )
+            console.print(table)
+            console.print(
+                "[dim]Devices are controlled by Windows host drivers; this subsystem "
+                "does not install or replace kernel drivers. Connector/cable presence "
+                "depends on hardware and may not be exposed.[/dim]"
+            )
+            return buf.getvalue().rstrip()
+
         if cmd == "gpu.compute":
             result = self.gpu.probe_compute()
             return f"GPU driver: {'active' if result['live'] else 'unavailable'} ({result['backend']})"
@@ -1586,13 +1630,6 @@ class OperatorShellEngine:
         # Distinct Custom Operator Command Vocabulary
         if cmd == "help":
             return self.format_help(" ".join(args) if args else None)
-
-        elif cmd in ("office", "office.writer", "office.sheet", "office.slides"):
-            current_user = self.variables.get("SYS.USER", "operator")
-            cwd = self.variables.get("SYS.CWD", f"/Users/{current_user}/home")
-            if not hasattr(self, "office_suite"):
-                return "[OFFICE ERROR] Office suite is unavailable in this shell instance."
-            return self.office_suite.execute(cmd, args, cwd, current_user)
 
         elif cmd == "sys.probe":
             return self.format_sys_probe()
@@ -1918,11 +1955,30 @@ class OperatorShellEngine:
                     self.variables["SYS.CWD"] = f"/Users/{uname}/home"
                     ui = self.user_mgr.get_user(uname)
                     role = ui.get("role", "user") if ui else "user"
+                    self.security.current_user = uname
+                    self.security.current_role = role
                     return (f"\033[1;32m[LOGIN OK]\033[0m Session started as '{uname}' (Role: {role})\n"
                             f"  Working directory set to: /Users/{uname}/home")
                 return "\033[31m[LOGIN FAILED]\033[0m Invalid username or password."
             except Exception as e:
                 return f"\033[31m[LOGIN ERROR]\033[0m {e}"
+
+        elif cmd == "logout":
+            if args:
+                return "Usage: logout"
+            previous_user = self.variables.get("SYS.USER", "operator")
+            self.variables["SYS.USER"] = "operator"
+            self.variables["SYS.CWD"] = "/Users/operator/home"
+            self.user_mgr.active_user = "operator"
+            self.user_mgr.active_role = "user"
+            self.security.current_user = "operator"
+            self.security.current_role = "user"
+            getattr(self, "_passd_auth_cache", {}).pop(previous_user, None)
+            return (
+                "\033[1;32m[LOGOUT OK]\033[0m Signed out of "
+                f"'{previous_user}' and switched to the default operator account.\n"
+                "  Working directory set to: /Users/operator/home"
+            )
 
         elif cmd in ("user.switch", "su"):
             if not args:
@@ -1935,6 +1991,10 @@ class OperatorShellEngine:
                 if user_info:
                     self.variables["SYS.USER"] = uname
                     self.variables["SYS.CWD"] = f"/Users/{uname}/home"
+                    self.user_mgr.active_user = uname
+                    self.user_mgr.active_role = user_info.get("role", "user")
+                    self.security.current_user = uname
+                    self.security.current_role = user_info.get("role", "user")
                     return (f"\033[1;33m[SU]\033[0m Switched to user '{uname}'.\n"
                             f"  CWD set to /Users/{uname}/home")
                 return f"\033[31m[SU FAILED]\033[0m User '{uname}' not found."
@@ -1966,6 +2026,9 @@ class OperatorShellEngine:
             user, pwd = args[0], args[1]
             if self.security.authenticate(user, pwd):
                 self.variables["SYS.USER"] = user
+                self.variables["SYS.CWD"] = f"/Users/{user}/home"
+                self.user_mgr.active_user = user
+                self.user_mgr.active_role = self.security.current_role
                 return f"\033[1;32m[AUTH OK]\033[0m Logged in as '{user}' (Role: {self.security.current_role})"
             return "\033[31m[AUTH FAILED] Invalid username or password.\033[0m"
 

@@ -1,33 +1,32 @@
-# Operator OS Architecture Specification (WSL-Style Subsystem)
+# Atlas OS v3 — Implemented Architecture
 
-Operator OS is a multi-tier operating system architecture operating on host virtualization/subsystem abstractions (analogous to WSL/Mach/L4 microkernel architectures), orchestrating high-performance native kernels with cross-language userland components.
+Atlas OS v3 is a host-run CLI subsystem prototype, not an implementation of WSL, Mach, L4, or a bare-metal operating system. Its Python shell and services execute as host processes. The C and Rust components are educational/native demonstrations; they do not boot the computer, provide a real kernel boundary, or replace host drivers. This is the final project release, with no further feature releases planned.
 
-Hardware telemetry is host-backed: on Windows, GPU inventory and driver health come from Windows CIM/WMI (and NVIDIA compute telemetry is queried from `nvidia-smi` when available); physical RAM is read from the host memory API and page-file usage from Windows CIM. Operator OS is not a bare-metal OS and does not install or replace the host's GPU driver.
+Hardware telemetry is host-backed: on Windows, GPU inventory and driver health come from Windows CIM/WMI (and NVIDIA telemetry is queried from `nvidia-smi` when available); physical RAM is read from the host memory API and page-file usage from Windows CIM. `device.list` reads present USB, display/monitor, and audio devices plus their installed host driver information from Windows Plug and Play. This reports audio/display adapters and endpoints, not guaranteed physical jack/cable insertion state. Atlas OS does not install or replace host kernel drivers. Host telemetry coverage varies by operating system and hardware.
 
 ## Subsystem Architecture Overview
 
 ```
  ┌──────────────────────────────────────────────────────────────┐
- │                      Operator OS Ecosystem                   │
+ │                       Atlas OS v3 Subsystem                   │
  ├──────────────────────────────────────────────────────────────┤
  │  [App Runtime Layer]     Java Operator Virtual Machine (OVM) │
  │  [Shell Language Layer]  Python Polyglot Shell (Multi-Bridge)│
  │  [Settings & Packages]   SQL System Registry & Package Repo  │
  ├──────────────────────────────────────────────────────────────┤
  ├──────────────────────────────────────────────────────────────┤
- │  [Microkernel Core]      C & Rust Subsystem Engine           │
- │                          - Memory Manager (Buddy / Slab)     │
- │                          - Preemptive Round-Robin Scheduler  │
- │                          - Virtual Filesystem (VFS) & Mounts │
- │                          - IPC Driver Bus (Named Pipes/Pty)  │
+ │  [Native Demonstrations] C and Rust example components      │
+ │                          - Scheduler and memory examples     │
+ │                          - Simulated device/driver registry  │
+ │                          - Not a bootable host kernel        │
  └──────────────────────────────────────────────────────────────┘
 ```
 
-## Language Roles & Module Mapping
+## Implemented Components
 
-1. **Kernel (`/kernel`) - C & Rust**:
-   - `core_kernel.c` / `operator_syscall.h`: Process control blocks (PCB), validated syscall dispatcher, priority-aware aging round-robin scheduler, process-owned memory pools, VFS nodes, and IPC.
-   - `kernel_guard/src/main.rs`: Rust page supervisor with bounded allocation/release and a stateful driver bus that validates registrations and rejects I/O to inactive devices.
+1. **Native demonstrations (`/kernel`) - C & Rust**:
+   - `core_kernel.c` / `operator_syscall.h`: Demonstration process control blocks (PCB), syscall-style dispatcher, priority-aware aging round-robin scheduler, process-owned memory pools, VFS nodes, and IPC. These are not host-kernel syscalls or a booted kernel.
+   - `kernel_guard/src/main.rs`: Rust page-allocation and simulated device-registry demonstration. It does not manage physical host memory or install host drivers.
 2. **Custom Multi-Shell (`/shell`) - Python**:
    - Custom grammar & interpreter (`OperatorScript`) featuring native execution, seamless pass-through and pipes into Linux Bash/WSL, PowerShell, and Command Prompt (cmd.exe).
    - `apps/nano.py` provides the terminal code editor; installed `editor.lang.*` packages provide opt-in, file-extension-matched completion lists. Completion generation is on-demand and redraw scheduling is configured for immediate shortcut feedback.
@@ -40,7 +39,7 @@ Hardware telemetry is host-backed: on Windows, GPU inventory and driver health c
    - `integrations/rclone_drive.py` uses the user's isolated rclone configuration for Google Drive authentication and file transfers, mounts each selected remote under its user's `Google Drive` directory, and keeps automatic local uploads behind a three-hour passphrase session.
    - `network/ssh_service.py` provides an Atlas-only SSH server with Ed25519 key authentication and an explicit command allowlist; its default listener is loopback-only, while the `ssh` client bridges to the host OpenSSH executable.
    - `core/services/service_runtime.cpp` implements native Windows process supervision (restart policy, TCP health probes, persistent logs) and the interval scheduler; persisted services start with the runtime, and `core/services/service_manager.py` is the narrow shell/FFI adapter. Scheduled Atlas actions are allowlisted and run through the authenticated user's shell context.
-   - Fused LÖVE2D game executables are installed in the default user's virtual `home/Games` directory; game data and LÖVE license notices are kept alongside in `Games/licenses`.
+   - The portable installer excludes game executables. The Windows development checkout may include fused LÖVE2D games and license notices in the default user's virtual `home/Games` directory.
 3. **App Runtime (`/runtime_java`) - Java**:
    - `OperatorApp` lifecycle manager and sandbox loader for Operator OS `.opk` / `.class` app execution.
 4. **Database (`/db`) - SQL / SQLite**:

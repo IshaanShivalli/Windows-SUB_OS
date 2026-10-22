@@ -12,7 +12,9 @@ Initializes:
 """
 
 import argparse
+import json
 import os
+import platform
 import shutil
 import sys
 import subprocess
@@ -98,7 +100,58 @@ def main(argv=None):
         action="store_true",
         help="Show diagnostic output from kernel and runtime startup components.",
     )
+    parser.add_argument(
+        "--source",
+        action="store_true",
+        help="Run the source checkout instead of the packaged runtime.",
+    )
     args = parser.parse_args(argv)
+
+    packaged_root = ROOT_DIR / "storage" / "operator_os_root" / "System"
+    packaged_entrypoint = packaged_root / "boot.pyc"
+    manifest_path = packaged_root / "runtime_manifest.json"
+    if not args.source and (packaged_root.exists() or packaged_entrypoint.exists()):
+        if not packaged_entrypoint.is_file() or not manifest_path.is_file():
+            print(
+                "[BOOT ERROR] Packaged runtime is incomplete. "
+                "Run `python build.py --package-runtime --rclone-executable <path-to-rclone.exe>`.",
+                file=sys.stderr,
+            )
+            return 1
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            print(f"[BOOT ERROR] Could not read packaged runtime manifest: {exc}", file=sys.stderr)
+            return 1
+        required_version = manifest.get("python_version")
+        current_version = ".".join(map(str, sys.version_info[:3]))
+        required_implementation = manifest.get("python_implementation")
+        if (
+            required_version != current_version
+            or required_implementation != platform.python_implementation()
+        ):
+            print(
+                "[BOOT ERROR] Packaged bytecode requires "
+                f"{required_implementation} {required_version}; the active interpreter is "
+                f"{platform.python_implementation()} {current_version}. "
+                "Rebuild the package with this Python.",
+                file=sys.stderr,
+            )
+            return 1
+
+        runtime_env = os.environ.copy()
+        runtime_env["OPERATOR_OS_ROOT_PATH"] = str(packaged_root.parent)
+        runtime_env["OPERATOR_STORAGE_IMAGE"] = str(
+            ROOT_DIR / "storage" / "operator_storage_2gb.img"
+        )
+        runtime_env["OPERATOR_STORAGE_ROOT_PATH"] = str(ROOT_DIR / "storage")
+        return subprocess.call(
+            [sys.executable, str(packaged_entrypoint), *(
+                ["--verbose"] if args.verbose else []
+            )],
+            cwd=packaged_root,
+            env=runtime_env,
+        )
 
     log("Starting Operator OS...")
     try:
@@ -142,6 +195,8 @@ def main(argv=None):
         )
 
         shell_py = ROOT_DIR / "shell" / "opshell.py"
+        if not shell_py.is_file():
+            shell_py = shell_py.with_suffix(".pyc")
         log("Starting Operator Shell...")
         shell_env = os.environ.copy()
         shell_env["OPERATOR_QUIET_START"] = "1"

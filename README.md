@@ -1,8 +1,8 @@
-# Operator OS
+# Atlas OS v3 — Final Release
 
-Operator OS is an experimental, Windows/WSL-style operating-system subsystem prototype. It combines a small native kernel demo with a Python control plane, a polyglot shell, a Java application runtime, a C++ window manager, a virtual storage device, networking utilities, and a SQLite system registry.
+Atlas OS v3 is the final release of this project. No further feature releases are planned. The project provides a host-run CLI operating-system subsystem prototype with a Python control plane, optional native demonstrations, host hardware probes, directory-backed user storage, and a SQLite system registry.
 
-This repository is a development prototype, not yet a bootable standalone operating-system image. The native components currently run as host processes and the networking/storage layers provide simulated or host-assisted services.
+Atlas OS is not a bootable standalone operating-system image, a hypervisor, or a replacement for Windows, macOS, or Linux. It runs as an application on the host. Its installer creates a per-user application environment and sparse 2 GB virtual-storage image; that image is a simulation, not a mounted disk or enforced quota. Hardware access is host-backed and read-only. Native features are optional and may be platform-specific.
 
 ## Features
 
@@ -17,47 +17,65 @@ This repository is a development prototype, not yet a bootable standalone operat
 - Java Operator Virtual Machine examples in [`runtime_java`](runtime_java)
 - SQLite system registry and package catalog in [`db`](db)
 
-## Requirements
+## Install Atlas OS v3 on a laptop
 
-See [`docs/REQUIREMENTS.md`](docs/REQUIREMENTS.md) for the complete list. The minimum runtime is Python 3.10+. The bootstrapper also expects the prebuilt native binaries and Java runtime to be available.
+Install Python 3.10 or newer on Windows, macOS, or Linux. Download and extract the final v3 source archive, open a terminal in the extracted folder, and run:
 
-Rust 1.85+ is required because the Cargo project uses Rust edition 2024. Java requires a JDK 17+ installation with both `java` and `javac` available.
+```console
+python install/installer.py
+```
 
-## Quick start
+On systems where the Python launcher is named `python3`, use `python3 install/installer.py`. The installer creates a private Python environment, installs the Python dependencies, provisions the user's virtual storage, and creates a launcher under the current user's application-data directory. It does not require administrator privileges, a compiler, Rust, Java, or prebuilt Windows executables. Start Atlas OS using the launcher path printed when installation finishes. Re-run the installer to copy the source files again without replacing the separate user storage directory. The installer has been exercised end-to-end on Windows; macOS and Linux are intended targets but have not been verified on those hosts.
 
-From the repository root on Windows:
+See [`docs/REQUIREMENTS.md`](docs/REQUIREMENTS.md) for requirements, platform-specific paths, and optional features. See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the implemented subsystem design. The former development roadmap is closed for this final release; it is not a commitment to future work.
+
+## Run from a source checkout
+
+For development, from the repository root:
 
 ```console
 python boot.py
 ```
 
-The bootstrapper initializes the SQLite registry and storage image, checks the network layer, starts the native and Java demonstrations, and launches the Operator shell.
-Boot output is concise by default. Pass `--verbose` to `boot.py` to show diagnostics from the kernel and runtime startup components. Run `python atlas.py` to open Operator OS in a separate console that remains open after shell exit or startup failure.
-
+The bootstrapper initializes the SQLite registry and virtual storage, checks the network layer, and launches the Atlas shell. Available host-specific native demonstrations are started when built. Pass `--verbose` to `boot.py` to show their diagnostics.
 To use the shell by itself:
 
 ```console
 python shell/opshell.py
 ```
 
-Build the native, Java, and Rust components into `bin`:
+The following commands are for maintainers rebuilding optional native and Java demonstrations, not end-user installation. The complete current native build requires Windows toolchains:
 
 ```console
 python build.py --release
 ```
 
-Useful commands include `help`, `sys.probe`, `gpu.probe`, `mem`, `storage.inspect`, `net.ifconfig`, `net.speed`, `pkg.list`, and `proc.list`. `gpu.probe` reads the host's GPU and driver status; `mem` reports live host RAM and swap statistics. `net.speed` continuously measures download and upload throughput using 1 MB samples against Cloudflare's public speed-test endpoint, shows current and cumulative average Mbps in a live CLI panel, and stops with Ctrl+C. Each cycle uploads and downloads about 1 MB; it requires internet access.
+To stage a modular runtime in the directory-backed virtual OS storage, include
+the local rclone executable when building on a compatible host:
+
+```console
+python build.py --release --package-runtime --rclone-executable "C:\Tools\rclone.exe"
+python boot.py
+```
+
+The staged runtime lives at `storage/operator_os_root/System`; `boot.py` uses it
+by default, while `python boot.py --source` explicitly runs the source checkout.
+This developer packaging flow is not required for end-user installation and
+does not produce a cross-platform standalone distribution. Rclone and game
+runtime assets remain optional host integrations.
+
+Useful commands include `help`, `sys.probe`, `gpu.probe`, `device.list`, `mem`, `storage.inspect`, `net.ifconfig`, `net.speed`, `pkg.list`, and `proc.list`. `gpu.probe` reads the host's GPU and driver status; `device.list [usb|display|audio]` lists present USB controllers/devices, displays, and audio devices with their host driver and Plug and Play status. Realtek analog audio is reported as AUX-capable and AMD display audio as HDMI audio. This is host-device discovery, not custom kernel drivers; actual connector/cable insertion state is only reported when the hardware exposes it. `mem` reports live host RAM and swap statistics. `net.speed` continuously measures download and upload throughput using 1 MB samples against Cloudflare's public speed-test endpoint, shows current and cumulative average Mbps in a live CLI panel, and stops with Ctrl+C. Each cycle uploads and downloads about 1 MB; it requires internet access.
 Use `help <command>` for detailed feature-specific instructions, or `help menu` to browse help for every Operator-specific command. General shell commands remain available in the main `help` reference.
 
-`time` reports the local clock and applies the most recent read-only NTP offset when synchronization is available. The time service starts with Operator Shell, samples public NTP servers in the background, and can be inspected or manually resynchronized with `time.service status` and `time.service sync [server]`. It does not change the Windows system clock.
+`time` reports the local clock and applies the most recent read-only NTP offset when synchronization is available. The time service starts with Operator Shell, samples public NTP servers in the background, and can be inspected or manually resynchronized with `time.service status` and `time.service sync [server]`. It does not change the host system clock.
 
 The shell suggests command names as you type, completes privileged subcommands after multiple words (for example, `passd sh`), and completes virtual-storage paths in command arguments. Previously entered full commands are also suggested from the current session's history.
-
-Open the graphical office suite with `office`. It provides a document browser and GUI editors for text documents, presentations, and database spreadsheets. `office.writer`, `office.sheet`, or `office.slides` opens the matching editor directly; append a file path to open that file. Files are stored in the active user's Operator home under `Documents`. Writer uses `.opdoc`, `.md`, or `.txt`; presentations use `.opsdeck`; spreadsheets use `.opsheet`, a SQLite database containing worksheet dimensions and cell values (not CSV). Double-click a spreadsheet cell to edit it; changes persist directly to its database.
 
 Separate commands with `;` (`cd ..; cd Games`). Single and double quotes preserve spaces and semicolons inside an argument, and backslashes are preserved in Windows paths such as `"C:\Users\Name\Games"`; use `\` to escape a quote, space, or semicolon when needed.
 
 The first `passd <command>` use for a non-root account prompts you to create and confirm a separate passd password, then runs the command. You can instead initialize it with `passd.setup`; use that command again to change the passd password after authenticating with the existing one. Passwords must be at least eight characters, are stored only as salted PBKDF2 hashes, and a successful authentication is cached for five minutes. This is separate from your Operator account password.
+
+Use `logout` to switch back to the default `operator` account and its home directory. The command clears the departing account's cached passd authentication.
 
 Scheduled jobs and managed services run in the native C++ runtime. Build it with `python build.py` before using `cron.*` or `srv.*`; its definitions, schedules, and logs are stored under the private Operator OS storage tree. Example jobs: `passd cron.add daily-backup 86400 backup.create daily` and `passd cron.add temp-cleanup 3600 storage.cleanup 7`. Jobs support only restore-point creation, age-limited cleanup under `/tmp`, `echo`, or validated `.opsh` scripts from the owner's virtual home. The minimum interval is 10 seconds. Use `cron.list`, `cron.logs <name>`, and `cron.remove <name>` to inspect/manage them. Jobs run only while Operator Shell is open; overdue jobs run when its C++ scheduler starts. Restore-point creation and shared `/tmp` cleanup require root.
 
@@ -73,7 +91,7 @@ Powcurl runs `.powcurl` media scripts through the Rust/C runtime. Install a Wind
 
 Connect Google Drive through rclone. Install the `rclone` executable, then run `drive.mount`. If the current Operator user has no configured rclone remote, `drive.mount` starts `rclone config` in that user's private config location; create a remote with the Google Drive (`drive`) storage type and complete rclone's browser sign-in. Operator OS does not ask for a Google OAuth Client ID or Google account password; rclone manages the sign-in and tokens. The chosen remote is mounted at `/Users/<user>/Google Drive`. `drive.ls [remote-path]` lists remote files; `drive.download <file-id-or-path>` downloads a file on demand. Writes are locked by default: run `drive.write.setup` to set a separate local passphrase, or `drive.write.unlock` to unlock an existing one. While unlocked, new and modified files in the local Drive folder upload automatically; the write unlock expires after three hours and must be renewed with the passphrase. `drive.upload <path>` performs an explicit upload while unlocked. Rclone configuration and credentials are stored under the current user's private Operator OS home, not in the source tree.
 
-The seven LÖVE2D game executables are copied into the default Operator user's virtual `/Users/operator/home/Games` folder, with game and LÖVE license notices in its `licenses` subfolder. Run `games.list` to see installed games and `games.launch "MATCH 3"` (or `game.launch PONG`) to play one. On first launch, missing LÖVE runtime DLLs are copied from the corresponding `CS50 2D/<game>/dist` distribution when available. On Windows, the launcher requests the per-application high-performance GPU preference; the selected GPU remains under Windows and graphics-driver control, so the OS may still choose an adapter. The original game distributions remain in `CS50 2D`.
+Game executables and other third-party runtime assets are not included in the portable installer. Add games that are compatible with the host to the virtual `/Users/operator/home/Games` folder before using `games.list` or `games.launch`. The existing LÖVE2D game launcher and GPU preference integration are Windows-specific. Review and include the appropriate game licenses and credits when redistributing game files.
 
 Language extensions are package manifests in `packages/repo` with an `editor_extension` object containing `language`, `file_extensions`, and `completions`. Add a package manifest following the existing `editor.lang.*` examples and install its package ID to activate its completion list.
 
@@ -81,7 +99,7 @@ Language extensions are package manifests in `packages/repo` with an `editor_ext
 
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — subsystem design and module responsibilities
 - [`docs/REQUIREMENTS.md`](docs/REQUIREMENTS.md) — runtime, build, and platform requirements
-- [`docs/ROADMAP.md`](docs/ROADMAP.md) — recommended additions and implementation order
+- [`docs/ROADMAP.md`](docs/ROADMAP.md) — final project status, scope, and known limitations
 
 ## Development notes
 
@@ -89,7 +107,11 @@ Generated files such as the SQLite database, sparse storage image, command journ
 
 ## Safety and scope
 
-The shell can invoke host shells and network operations. Run it in a development environment and review scripts before executing them. The current storage image is a simulation and should not be treated as a production filesystem.
+The shell can invoke host shells and network operations. Run it in a development environment and review scripts before executing them. The 2 GB storage image is a sparse simulation; persistent virtual files and the
+packaged runtime are stored in the adjacent directory-backed
+`storage/operator_os_root` tree. Storage usage reports the bytes in that tree,
+but the prototype does not enforce a hard 2 GB quota or mount the sparse image
+as a filesystem.
 
 ## License
 

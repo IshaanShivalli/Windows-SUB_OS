@@ -201,6 +201,45 @@ class ShellAppAndGameCommandTests(unittest.TestCase):
         self.assertIn("My Game.exe", result)
         self.assertNotIn("licenses", result)
 
+    def test_game_manager_launch_accepts_virtual_games_path_and_exe_name(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary) / "home"
+            games = home / "Games"
+            games.mkdir(parents=True)
+            executable = games / "MARIO.exe"
+            executable.write_bytes(b"game")
+            for runtime in (
+                "love.dll", "lua51.dll", "mpg123.dll", "msvcp120.dll",
+                "msvcr120.dll", "OpenAL32.dll", "SDL2.dll",
+            ):
+                (games / runtime).write_bytes(b"runtime")
+
+            gpu = Mock()
+            gpu.set_high_performance_preference.return_value = "GPU preference set."
+            process = Mock()
+            process.pid = 1234
+            gpu.launch_command.return_value = process
+            from core.process.game_manager import GameManager
+
+            manager = GameManager(gpu)
+            with patch("core.process.game_manager.GAME_DISTRIBUTIONS_ROOT", Path(temporary) / "dist"):
+                result = manager.launch("Games/MARIO.exe", games)
+
+        self.assertIn("[GAME LAUNCHED] MARIO", result)
+        gpu.launch_command.assert_called_once()
+        self.assertEqual(gpu.launch_command.call_args.args[0], str(executable))
+
+    def test_game_manager_rejects_executable_paths_outside_games_folder(self):
+        from core.process.game_manager import GameManager
+
+        manager = GameManager(Mock())
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            games = root / "Games"
+            games.mkdir()
+            with self.assertRaisesRegex(ValueError, "inside the installed Games directory"):
+                manager.launch(str(root / "outside.exe"), games)
+
     def test_app_launch_accepts_multiword_manifest_names(self):
         shell = OperatorShellEngine.__new__(OperatorShellEngine)
         shell.app_mgr = Mock()

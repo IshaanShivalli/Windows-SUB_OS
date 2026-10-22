@@ -1,6 +1,9 @@
 #include <Windows.h>
 #include <winhttp.h>
 
+#include <algorithm>
+#include <chrono>
+#include <csignal>
 #include <cstdlib>
 #include <iomanip>
 #include <iostream>
@@ -13,10 +16,31 @@
 
 namespace {
 
+volatile std::sig_atomic_t stop_requested = 0;
+
+void handle_interrupt(int) {
+    stop_requested = 1;
+}
+
 std::string format_mbps(double value) {
     std::ostringstream out;
     out << std::fixed << std::setprecision(2) << value << " Mbps";
     return out.str();
+}
+
+std::string graph(const std::vector<double>& history) {
+    static constexpr char levels[] = " .:-=+*#%@";
+    std::string result;
+    for (double value : history) {
+        const double scaled = std::clamp(value / 1000.0, 0.0, 1.0);
+        const size_t index = static_cast<size_t>(scaled * (sizeof(levels) - 2));
+        result += levels[index];
+    }
+    return result;
+}
+
+size_t progress_width(double value) {
+    return static_cast<size_t>(std::clamp(value / 1000.0, 0.0, 1.0) * 24.0);
 }
 
 struct Sample {
@@ -26,6 +50,53 @@ struct Sample {
     double avg_upload_mbps = 0.0;
     size_t samples = 0;
 };
+
+bool enable_virtual_terminal() {
+    HANDLE output = GetStdHandle(STD_OUTPUT_HANDLE);
+    DWORD mode = 0;
+    if (output == INVALID_HANDLE_VALUE || !GetConsoleMode(output, &mode)) {
+        return false;
+    }
+    return SetConsoleMode(output, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING) != 0;
+}
+
+void render_dashboard(const Sample& latest, const Sample& totals,
+                      const std::vector<double>& download_history,
+                      const std::vector<double>& upload_history,
+                      size_t samples, double elapsed_seconds, bool ansi) {
+    const char* cyan = ansi ? "\x1b[1;36m" : "";
+    const char* green = ansi ? "\x1b[1;32m" : "";
+    const char* yellow = ansi ? "\x1b[1;33m" : "";
+    const char* dim = ansi ? "\x1b[2m" : "";
+    const char* reset = ansi ? "\x1b[0m" : "";
+    if (ansi) {
+        std::cout << "\x1b[2J\x1b[H";
+    }
+
+    const size_t download_bar = progress_width(latest.download_mbps);
+    const size_t upload_bar = progress_width(latest.upload_mbps);
+    std::cout << cyan << "+------------------------------------------------------------------+" << reset << "\n"
+              << cyan << "|                 OPERATOR NETWORK SPEED TEST                      |" << reset << "\n"
+              << cyan << "+------------------------------------------------------------------+" << reset << "\n"
+              << " Status: " << green << "RUNNING" << reset << "    Samples: " << samples
+              << "    Duration: " << std::fixed << std::setprecision(1)
+              << elapsed_seconds << " s\n\n"
+              << " Download  " << std::setw(10) << format_mbps(latest.download_mbps)
+              << "   Avg " << std::setw(10) << format_mbps(totals.avg_download_mbps)
+              << "   [" << std::string(download_bar, '#')
+              << std::string(24 - download_bar, ' ') << "]\n"
+              << " Upload    " << std::setw(10) << format_mbps(latest.upload_mbps)
+              << "   Avg " << std::setw(10) << format_mbps(totals.avg_upload_mbps)
+              << "   [" << std::string(upload_bar, '#')
+              << std::string(24 - upload_bar, ' ') << "]\n\n"
+              << " Download history  " << graph(download_history) << "\n"
+              << " Upload history    " << graph(upload_history) << "\n\n"
+              << dim << "Bars scale to 1000 Mbps. Each sample transfers about 1 MB "
+                    "in each direction." << reset << "\n"
+              << cyan << "--------------------------------------------------------------------" << reset << "\n"
+              << " Press " << yellow << "Ctrl+C" << reset << " to stop.\n"
+              << std::flush;
+}
 
 std::string download_url(const std::string& base, size_t bytes) {
     std::ostringstream url;
@@ -130,29 +201,54 @@ Sample sample_once() {
 }  // namespace
 
 int main() {
-    std::cout << "Operator network speed test (C++ native)\n";
-    std::cout << "Press Ctrl+C to stop.\n";
+    std::signal(SIGINT, handle_interrupt);
+    const bool ansi = enable_virtual_terminal();
     Sample total;
+    Sample latest;
     size_t sample_count = 0;
+    std::vector<double> download_history;
+    std::vector<double> upload_history;
+    const auto started = std::chrono::steady_clock::now();
+    if (ansi) {
+        std::cout << "\x1b[?25l";
+    }
     try {
-        while (true) {
-            Sample sample = sample_once();
+        while (!stop_requested) {
+            latest = sample_once();
+            if (stop_requested) {
+                break;
+            }
+            Sample sample = latest;
             total.download_mbps += sample.download_mbps;
             total.upload_mbps += sample.upload_mbps;
             sample_count += 1;
             total.avg_download_mbps = total.download_mbps / sample_count;
             total.avg_upload_mbps = total.upload_mbps / sample_count;
 
-            std::cout << "\rDownload: " << format_mbps(sample.download_mbps)
-                      << " | Upload: " << format_mbps(sample.upload_mbps)
-                      << " | Avg: " << format_mbps(total.avg_download_mbps)
-                      << " / " << format_mbps(total.avg_upload_mbps)
-                      << " | Samples: " << sample_count << "      " << std::flush;
+            download_history.push_back(sample.download_mbps);
+            upload_history.push_back(sample.upload_mbps);
+            if (download_history.size() > 64) {
+                download_history.erase(download_history.begin());
+                upload_history.erase(upload_history.begin());
+            }
+            const double elapsed = std::chrono::duration<double>(
+                std::chrono::steady_clock::now() - started).count();
+            render_dashboard(latest, total, download_history, upload_history,
+                             sample_count, elapsed, ansi);
 
             std::this_thread::sleep_for(std::chrono::seconds(1));
         }
-    } catch (const std::exception&) {
-        std::cout << "\n\n[SPEED TEST STOPPED]" << std::endl;
-        return 0;
+    } catch (const std::exception& error) {
+        if (ansi) {
+            std::cout << "\x1b[?25h";
+        }
+        std::cerr << "\n[SPEED TEST ERROR] " << error.what() << std::endl;
+        return 1;
     }
+    if (ansi) {
+        std::cout << "\x1b[?25h";
+    }
+    std::cout << "\n[SPEED TEST STOPPED] " << sample_count
+              << " sample(s) completed." << std::endl;
+    return 0;
 }

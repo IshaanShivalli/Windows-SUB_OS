@@ -1,3 +1,4 @@
+import os
 import struct
 import subprocess
 from pathlib import Path
@@ -36,7 +37,12 @@ class BootableTargetBuilder:
 
     def get_qemu_command(self) -> str:
         img = self.build_bootable_image()
-        storage = ROOT_DIR / "storage" / "operator_storage_2gb.img"
+        storage = Path(
+            os.environ.get(
+                "OPERATOR_STORAGE_IMAGE",
+                ROOT_DIR / "storage" / "operator_storage_2gb.img",
+            )
+        )
         return f"qemu-system-x86_64 -m 2048 -drive file={img},format=raw -drive file={storage},format=raw -net nic,model=virtio -net user -vga std"
 
 if __name__ == "__main__":

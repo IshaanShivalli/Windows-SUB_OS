@@ -25,7 +25,12 @@ class DeveloperTools:
         results["kernel_rust"] = "PASS" if r_exe.exists() else "FAIL"
 
         # Test 3: 2GB Storage Device
-        img = ROOT_DIR / "storage" / "operator_storage_2gb.img"
+        img = Path(
+            os.environ.get(
+                "OPERATOR_STORAGE_IMAGE",
+                ROOT_DIR / "storage" / "operator_storage_2gb.img",
+            )
+        )
         results["storage_2gb"] = "PASS" if img.exists() and img.stat().st_size > 0 else "FAIL"
 
         # Test 4: Database Schema

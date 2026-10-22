@@ -1,53 +1,30 @@
-# Operator OS Roadmap
+# Atlas OS v3 — Project Status
 
-The project already has a strong subsystem demo. The following additions would make it more useful, safer, and closer to an operating system.
+Atlas OS v3 is the final planned release of this project. No additional
+feature-development roadmap is active.
 
-## Highest priority
+## Final release scope
 
-1. **Reproducible build system** — add a PowerShell build script and CI workflow that compile C, C++, Rust, and Java components into a clean `build/` directory.
-2. **Tests** — add Python unit tests for storage, networking, shell parsing, database initialization, and boot failure handling.
-3. **Configuration and logging** — replace hard-coded interfaces, paths, commands, and version values with a typed config file and structured logs.
-4. **Process manager** — implement process IDs, lifecycle states, signals, exit codes, resource limits, and a real process table shared by the shell and GUI.
-5. **Permission model** — enforce users, roles, ACLs, and sandbox boundaries instead of only storing them in SQLite.
+- A host-run Python CLI subsystem for Windows, macOS, and Linux conventions.
+- A user-level installer that creates an isolated Python environment and
+  persistent, directory-backed virtual storage.
+- Host-backed hardware discovery where the host exposes supported telemetry.
+- Optional native demonstrations and integrations that remain platform- and
+  toolchain-dependent.
 
-## Desktop UI follow-ups
+## Known limitations
 
-- Replace the remaining compatibility compositor code with the modular `gui/ui/` implementation
-- Add true per-application resize handles and snap layouts
-- Replace GUI shell output redirection with a persistent shell service and IPC stream
-- Add clickable File Manager navigation and safe copy/move/delete operations
-- Extend Google Drive's on-demand mount with remote change detection, conflict handling, and offline placeholders
+- Atlas OS is not a bootable image, virtual machine, hypervisor, or replacement
+  for the host operating system.
+- The sparse 2 GB storage image is a logical simulation. It is not mounted as a
+  filesystem and does not enforce a hard capacity limit.
+- Windows is the only host on which the complete installer flow has been
+  exercised end-to-end. macOS and Linux support is unverified.
+- Native compiler outputs and third-party game/runtime binaries are not
+  cross-platform and are not included by the portable installer.
+- Some subsystems depend on external programs, network access, host APIs, or
+  optional development toolchains.
 
-## Core OS capabilities
-
-- Real syscall boundary between user programs and the kernel
-- Virtual memory, page permissions, and memory accounting
-- IPC primitives and service discovery
-- VFS abstraction with mounts, file descriptors, permissions, and recovery
-- Device abstraction and driver loading
-- Scheduler priorities, timers, sleep, and synchronization primitives
-- Crash reports, watchdogs, and safe-mode boot
-
-## User experience
-
-- Persistent shell history search, completion, aliases, and pipelines
-- Package manager with signed manifests, dependency resolution, uninstall, and rollback
-- Settings service and a consistent system event bus
-- Notifications, clipboard, audio, input, display scaling, and accessibility support
-- Application manifest format with versioning, permissions, icons, and update channels
-
-## Networking and security
-
-- Replace simulated interfaces/routes with an explicit host adapter backend
-- TLS certificate validation, URL allowlists, and request size limits
-- Firewall policy and per-process network permissions
-- Secrets/key store and encrypted user data
-- Signed releases and reproducible artifact checksums
-
-## Later milestones
-
-- Virtual machine or emulator boot target
-- Installer and recovery image
-- Snapshot/restore support for the virtual disk
-- Remote administration API with authentication and audit logs
-- Performance benchmarks and tracing dashboard
+The roadmap entries formerly listed here were ideas, not implemented
+capabilities or promises. This document records the final project's scope and
+known limits rather than proposing additional v3 work.

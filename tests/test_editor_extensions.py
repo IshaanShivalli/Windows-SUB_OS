@@ -207,6 +207,29 @@ class EditorLanguageExtensionTests(unittest.TestCase):
         self.assertEqual(options["terminal_size_polling_interval"], 1.0)
         self.assertFalse(editor.text_buffer.complete_while_typing())
 
+    def test_editor_assigns_distinct_colors_to_syntax_token_categories(self):
+        with patch("apps.nano.Application", return_value=None):
+            editor = OperatorCodeEditor(
+                str(self.source_file),
+                working_dir=str(self.temp_path),
+                extension_db_path=self.database,
+            )
+
+        colors = {
+            category: editor.style.get_attrs_for_style_str(
+                f"class:pygments.{category}"
+            ).color
+            for category in (
+                "keyword",
+                "name.builtin",
+                "literal.string",
+                "literal.number",
+                "comment",
+            )
+        }
+
+        self.assertEqual(len(set(colors.values())), len(colors))
+
     def test_inactive_or_nonmatching_extensions_do_not_enable_completions(self):
         self.install_extension("editor.lang.python", status="inactive")
         self.assertIsNone(load_language_extension(str(self.source_file), self.database))

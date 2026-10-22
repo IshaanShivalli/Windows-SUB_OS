@@ -38,7 +38,12 @@ class ServiceManager:
         root = (
             Path(storage.get_os_root())
             if storage is not None
-            else ROOT_DIR / "storage" / "operator_os_root"
+            else Path(
+                os.environ.get(
+                    "OPERATOR_OS_ROOT_PATH",
+                    ROOT_DIR / "storage" / "operator_os_root",
+                )
+            )
         )
         self._job_callback = JOB_CALLBACK(self._run_scheduled_job)
         self._handle = self._library.atlas_runtime_create(

@@ -12,7 +12,10 @@ CHILD_MARKER = "--_operator-launcher-child"
 
 
 def run_boot(arguments: list[str], *, pause: bool) -> int:
-    command = [sys.executable, str(ROOT_DIR / "boot.py"), *arguments]
+    boot_script = ROOT_DIR / "boot.py"
+    if not boot_script.is_file():
+        boot_script = boot_script.with_suffix(".pyc")
+    command = [sys.executable, str(boot_script), *arguments]
     try:
         result = subprocess.run(command, cwd=ROOT_DIR, check=False)
     except OSError as exc:

@@ -162,6 +162,31 @@ class PassdAndCompletionTests(unittest.TestCase):
         self.assertEqual(manager.verify_passd_password.call_count, 3)
         manager.set_passd_password.assert_not_called()
 
+    def test_logout_returns_to_operator_and_clears_previous_passd_auth(self):
+        shell = OperatorShellEngine.__new__(OperatorShellEngine)
+        shell.variables = {
+            "SYS.USER": "alice",
+            "SYS.CWD": "/Users/alice/home/Documents",
+        }
+        shell.user_mgr = SimpleNamespace(active_user="alice", active_role="user")
+        shell.security = SimpleNamespace(current_user="alice", current_role="root")
+        shell._passd_auth_cache = {"alice": {"timestamp": time.time()}}
+
+        result = shell.eval_command("logout")
+
+        self.assertIn("[LOGOUT OK]", result)
+        self.assertEqual(shell.variables["SYS.USER"], "operator")
+        self.assertEqual(shell.variables["SYS.CWD"], "/Users/operator/home")
+        self.assertEqual(shell.user_mgr.active_user, "operator")
+        self.assertEqual(shell.user_mgr.active_role, "user")
+        self.assertEqual(shell.security.current_user, "operator")
+        self.assertEqual(shell.security.current_role, "user")
+        self.assertNotIn("alice", shell._passd_auth_cache)
+
+    def test_logout_rejects_arguments(self):
+        shell = OperatorShellEngine.__new__(OperatorShellEngine)
+        self.assertEqual(shell.eval_command("logout now"), "Usage: logout")
+
     def test_passd_requests_three_attempts_and_does_not_run_on_failure(self):
         manager = Mock()
         manager.has_passd_password.return_value = True

@@ -211,6 +211,22 @@ class OperatorCodeEditor:
             "completion-menu.meta.current": "bg:#094771 #ffffff",
             "scrollbar.background": "bg:#1e1e1e",
             "scrollbar.button": "bg:#424242",
+            "pygments.keyword": "#c586c0",
+            "pygments.keyword.constant": "#569cd6",
+            "pygments.name": "#9cdcfe",
+            "pygments.name.builtin": "#4ec9b0",
+            "pygments.name.function": "#dcdcaa",
+            "pygments.name.class": "#4ec9b0",
+            "pygments.name.decorator": "#d7ba7d",
+            "pygments.literal.string": "#ce9178",
+            "pygments.literal.string.doc": "#6a9955",
+            "pygments.literal.number": "#b5cea8",
+            "pygments.operator": "#d4d4d4",
+            "pygments.operator.word": "#c586c0",
+            "pygments.punctuation": "#d4d4d4",
+            "pygments.comment": "#6a9955 italic",
+            "pygments.generic.deleted": "#f44747",
+            "pygments.generic.inserted": "#6a9955",
         })
 
         self.app = Application(
